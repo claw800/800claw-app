@@ -1,13 +1,17 @@
 name: Build
 
 on:
-  push:
-    branches:
-      - master
-      - 'github-releases/**'
-  pull_request:
-    branches:
-      - master
+  workflow_dispatch:
+  # NOTE(claw800): upstream Termux CI triggers disabled during Phase 2
+  # iteration to avoid burning Actions minutes on every master push / PR.
+  # Re-enable selectively once the fork stabilizes.
+  # push:
+  #   branches:
+  #     - master
+  #     - 'github-releases/**'
+  # pull_request:
+  #   branches:
+  #     - master
 
 jobs:
   build:

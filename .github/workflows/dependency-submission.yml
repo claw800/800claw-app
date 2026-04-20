@@ -1,9 +1,12 @@
 name: Automatic Dependency Submission
 
 on:
-  push:
-    branches: [ 'master' ]
   workflow_dispatch:
+  # NOTE(claw800): upstream Termux CI triggers disabled during Phase 2
+  # iteration to avoid burning Actions minutes on every master push.
+  # Re-enable once the fork stabilizes.
+  # push:
+  #   branches: [ 'master' ]
 
 permissions:
   contents: write

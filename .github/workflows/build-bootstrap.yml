@@ -2,13 +2,16 @@ name: Build Bootstrap Assets
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - master
-      - 'upgrade/**'
-    paths:
-      - 'tools/bootstrap/**'
-      - '.github/workflows/build-bootstrap.yml'
+  # NOTE(claw800): kept for future reference. Disabled for now to avoid
+  # auto-runs on every matching push during Phase 2 iteration; bootstrap
+  # asset rebuilds are rare and cheap to trigger manually.
+  # push:
+  #   branches:
+  #     - master
+  #     - 'upgrade/**'
+  #   paths:
+  #     - 'tools/bootstrap/**'
+  #     - '.github/workflows/build-bootstrap.yml'
 
 jobs:
   bootstrap-assets:
