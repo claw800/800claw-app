@@ -20,6 +20,13 @@ local.properties
 # Signing files
 .signing/
 
+# claw800: never commit signing keys or secrets
+keystore/
+*.jks
+*.keystore
+*.p12
+signing.properties
+
 # Intellij
 .idea/
 *.iml
