@@ -1,8 +1,4 @@
 jdk:
-<<<<<<< HEAD
   - openjdk17
-=======
-  - openjdk11
->>>>>>> v0.119.0-beta.3
 env:
   JITPACK_NDK_VERSION: "29.0.14206865"
