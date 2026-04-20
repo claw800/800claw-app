@@ -101,20 +101,32 @@ RUN mkdir -p /output && \
 # --hard-dereference resolves every hard link to a full file copy at
 # pack time, producing an Android-extractable tarball at the cost of
 # a modest size increase (~20-40 MB for a typical Ubuntu Noble image).
+# NOTE: --anchored plus ./<name> pattern prefix is REQUIRED.
+# Without --anchored, GNU tar treats --exclude=PATTERN as a BASENAME
+# match (any path whose last component equals PATTERN). That silently
+# drops unrelated directories deep in the tree, e.g.
+# /opt/venv/.../prompt_toolkit/output/ was removed before this fix,
+# which made nanobot crash with
+#   ModuleNotFoundError: No module named 'prompt_toolkit.output'.
+# --anchored constrains excludes to paths relative to tar's working
+# directory (-C /), so ./output only matches /output, ./dev only
+# matches /dev, etc. This is the only safe way to exclude top-level
+# pseudo-filesystem and build-artifact paths.
 RUN tar -C / \
       --xattrs \
       --acls \
       --numeric-owner \
       --hard-dereference \
-      --exclude=proc \
-      --exclude=sys \
-      --exclude=dev \
-      --exclude=run \
-      --exclude=tmp \
-      --exclude=mnt \
-      --exclude=media \
-      --exclude=output \
-      --exclude=.dockerenv \
+      --anchored \
+      --exclude=./proc \
+      --exclude=./sys \
+      --exclude=./dev \
+      --exclude=./run \
+      --exclude=./tmp \
+      --exclude=./mnt \
+      --exclude=./media \
+      --exclude=./output \
+      --exclude=./.dockerenv \
       -cJf "/output/ubuntu-noble-${ROOTFS_ARCH_LABEL}.tar.xz" .
 
 FROM scratch
