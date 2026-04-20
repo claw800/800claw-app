@@ -92,10 +92,20 @@ RUN mkdir -p /output && \
 
 # 8) Pack rootfs tarball.
 #    ROOTFS_ARCH_LABEL is provided by the build script/workflow as arm64-v8a or x86_64.
+# NOTE: --hard-dereference is REQUIRED for Android.
+# Android app-private storage (/data/data/<pkg>/...) does not allow
+# creation of hard links due to SELinux / filesystem restrictions, even
+# within the same package's data directory. tarballs containing hard
+# links (perl5.38.2 -> perl, bzcat -> bzip2, etc.) therefore fail with
+# "Cannot hard link ... : Permission denied" on extraction.
+# --hard-dereference resolves every hard link to a full file copy at
+# pack time, producing an Android-extractable tarball at the cost of
+# a modest size increase (~20-40 MB for a typical Ubuntu Noble image).
 RUN tar -C / \
       --xattrs \
       --acls \
       --numeric-owner \
+      --hard-dereference \
       --exclude=proc \
       --exclude=sys \
       --exclude=dev \
