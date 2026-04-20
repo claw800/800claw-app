@@ -1,0 +1,14 @@
+# Format:
+# <package_variant>|<version>|<arch>|<sha256>
+#
+# arch values in this file follow termux bootstrap naming:
+# - aarch64
+# - x86_64
+#
+# This file intentionally tracks only PoC-supported ABIs.
+
+apt-android-7|2025.03.28-r1+apt-android-7|aarch64|c8d702b6f742935001c37cda81b8ac69504a95d5cf28f2899532dd8cd4b057eb
+apt-android-7|2025.03.28-r1+apt-android-7|x86_64|1c124ec2396ee70a51b0b0a574f29aa659526aa2b9f558f993b2fb05d1e51855
+
+apt-android-5|2025.03.28-r3+apt-android-5|aarch64|147c98e610a30588665a89776314833c293006b12c70e65dcde6eb54c2344113
+apt-android-5|2025.03.28-r3+apt-android-5|x86_64|4f6866c222b0f1ae1b180220ffc6e8e1afbc10b9cbb7a462c062c490eda90044

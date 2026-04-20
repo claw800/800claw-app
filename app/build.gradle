@@ -254,14 +254,10 @@ task downloadBootstraps() {
         if (packageVariant == "apt-android-7") {
             def version =  "2025.03.28-r1" + "+" + packageVariant
             downloadBootstrap("aarch64", "c8d702b6f742935001c37cda81b8ac69504a95d5cf28f2899532dd8cd4b057eb", version)
-            downloadBootstrap("arm",     "f3bb9d1b32552b34fff41861dbf193ec5ba2848d67d779ac1c7256da6640f85d", version)
-            downloadBootstrap("i686",    "36db3e1ac3547f9a174fd763bd9a484fa1a3449cdd81e1cf2408ff0454f839c6", version)
             downloadBootstrap("x86_64",  "1c124ec2396ee70a51b0b0a574f29aa659526aa2b9f558f993b2fb05d1e51855", version)
         } else if (packageVariant == "apt-android-5") {
             def version = "2025.03.28-r3" + "+" + packageVariant
             downloadBootstrap("aarch64", "147c98e610a30588665a89776314833c293006b12c70e65dcde6eb54c2344113", version)
-            downloadBootstrap("arm", "363c28dd4b70c995302498beae79fb5917af7d3b0ca9fbd9da7de96ab64c6122", version)
-            downloadBootstrap("i686", "a2e742381ab24cf8c9a78ae4e2425ee44d8fb9625a2b0ef63e4cd32e292f7186", version)
             downloadBootstrap("x86_64", "4f6866c222b0f1ae1b180220ffc6e8e1afbc10b9cbb7a462c062c490eda90044", version)
         } else {
             throw new GradleException("Unsupported TERMUX_PACKAGE_VARIANT \"" + packageVariant + "\"")

@@ -1,0 +1,40 @@
+name: Build Bootstrap Assets
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - 'upgrade/**'
+    paths:
+      - 'tools/bootstrap/**'
+      - '.github/workflows/build-bootstrap.yml'
+
+jobs:
+  bootstrap-assets:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download and verify bootstrap zips
+        shell: bash
+        run: |
+          chmod +x tools/bootstrap/fetch_bootstraps.sh
+          tools/bootstrap/fetch_bootstraps.sh
+
+      - name: Generate checksums manifest
+        shell: bash
+        run: |
+          cd tools/bootstrap/output
+          find . -type f -name "*.zip" -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          ls -lah .
+
+      - name: Upload bootstrap artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: termux-bootstraps
+          path: |
+            tools/bootstrap/output/**
+            !tools/bootstrap/output/**/*.tmp
