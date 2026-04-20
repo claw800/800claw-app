@@ -1,0 +1,103 @@
+name: Build Custom Termux Bootstrap (with proot pre-bundled)
+
+# NOTE(claw800): This workflow produces Termux bootstrap zips with `proot` (and
+# optionally `proot-distro`) pre-installed, so our runtime APK can launch the
+# pre-baked Ubuntu rootfs offline on first run without requiring the end user
+# to run `pkg install proot` manually.
+#
+# We use Termux's own generate-bootstraps.sh (from termux/termux-packages)
+# rather than hand-rolling an "augment downloaded bootstrap" pipeline, because
+# that tool already correctly:
+#   - resolves .deb dependencies
+#   - rewrites SYMLINKS.txt (Termux bootstrap custom symlink manifest)
+#   - pulls per-arch .debs from the upstream package repo
+#
+# Dispatch-only, matching the Phase 2 policy of avoiding auto-runs on push.
+on:
+  workflow_dispatch:
+    inputs:
+      extra_packages:
+        description: "Comma-separated extra packages to add to the bootstrap"
+        required: false
+        default: "proot,proot-distro"
+      architectures:
+        description: "Comma-separated architectures (termux naming: aarch64,x86_64,arm,i686)"
+        required: false
+        default: "aarch64,x86_64"
+      package_variant:
+        description: "Package variant: apt-android-7 (modern) or apt-android-5 (legacy)"
+        required: false
+        default: "apt-android-7"
+
+jobs:
+  build-custom-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout claw800 fork
+        uses: actions/checkout@v6
+
+      - name: Clone termux-packages
+        run: |
+          git clone --depth=1 https://github.com/termux/termux-packages.git termux-packages
+
+      - name: Generate bootstrap zips with extra packages
+        working-directory: termux-packages
+        env:
+          EXTRA_PACKAGES: ${{ github.event.inputs.extra_packages || 'proot,proot-distro' }}
+          ARCHITECTURES: ${{ github.event.inputs.architectures || 'aarch64,x86_64' }}
+          PACKAGE_VARIANT: ${{ github.event.inputs.package_variant || 'apt-android-7' }}
+        run: |
+          set -euo pipefail
+          echo "Building with: arch=${ARCHITECTURES} variant=${PACKAGE_VARIANT} extras=${EXTRA_PACKAGES}"
+          # run-docker.sh pulls the official termux-packages build image on the
+          # first invocation and runs the given command inside it with the repo
+          # mounted at /home/builder/termux-packages.
+          ./scripts/run-docker.sh ./scripts/generate-bootstraps.sh \
+            --architectures "${ARCHITECTURES}" \
+            --add "${EXTRA_PACKAGES}"
+
+      - name: Stage output and compute checksums
+        env:
+          EXTRA_PACKAGES: ${{ github.event.inputs.extra_packages || 'proot,proot-distro' }}
+          PACKAGE_VARIANT: ${{ github.event.inputs.package_variant || 'apt-android-7' }}
+        run: |
+          set -euo pipefail
+          OUT_ROOT="tools/bootstrap/output-custom/${PACKAGE_VARIANT}"
+          mkdir -p "$OUT_ROOT"
+          # generate-bootstraps.sh writes bootstrap-<arch>.zip to the repo root.
+          shopt -s nullglob
+          moved=0
+          for f in termux-packages/bootstrap-*.zip; do
+            cp "$f" "$OUT_ROOT/"
+            moved=$((moved+1))
+          done
+          if [[ $moved -eq 0 ]]; then
+            echo "ERROR: no bootstrap-*.zip produced by generate-bootstraps.sh" >&2
+            ls -lah termux-packages || true
+            exit 1
+          fi
+          {
+            echo "# Custom Termux bootstrap zips"
+            echo "# package_variant=${PACKAGE_VARIANT}"
+            echo "# extra_packages=${EXTRA_PACKAGES}"
+            echo "# generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "# generator=termux/termux-packages@$(cd termux-packages && git rev-parse HEAD)"
+          } > "$OUT_ROOT/MANIFEST.txt"
+          (cd "$OUT_ROOT" && find . -maxdepth 1 -type f -name "bootstrap-*.zip" -print0 \
+              | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          echo "--- Output ---"
+          ls -lah "$OUT_ROOT"
+          echo "--- SHA256SUMS.txt ---"
+          cat "$OUT_ROOT/SHA256SUMS.txt"
+          echo "--- MANIFEST.txt ---"
+          cat "$OUT_ROOT/MANIFEST.txt"
+
+      - name: Upload custom bootstrap artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: termux-custom-bootstraps
+          path: |
+            tools/bootstrap/output-custom/**
+          if-no-files-found: error
