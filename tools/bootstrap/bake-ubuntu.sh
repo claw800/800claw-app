@@ -8,6 +8,14 @@ ARCH="all"
 OUTPUT_DIR="$ROOT_DIR/tools/bootstrap/output/rootfs"
 ENABLE_BROWSER_STACK="${ENABLE_BROWSER_STACK:-0}"
 
+# Optional buildx cache wiring. Set these in CI (e.g. from the GitHub
+# Actions workflow) to enable layer-level cache reuse across runs. Leave
+# unset locally to build without any cache backend.
+#   BUILDX_CACHE_FROM, e.g. "type=gha,scope=ubuntu-rootfs-arm64-v8a"
+#   BUILDX_CACHE_TO,   e.g. "type=gha,mode=max,scope=ubuntu-rootfs-arm64-v8a"
+BUILDX_CACHE_FROM="${BUILDX_CACHE_FROM:-}"
+BUILDX_CACHE_TO="${BUILDX_CACHE_TO:-}"
+
 usage() {
   cat <<'EOF'
 Usage: tools/bootstrap/bake-ubuntu.sh [--arch <arm64-v8a|x86_64|all>] [--output-dir <path>]
@@ -49,11 +57,20 @@ build_one() {
   mkdir -p "$dest"
   echo "Building rootfs for $arch_label ($platform)"
 
+  local -a cache_args=()
+  if [[ -n "$BUILDX_CACHE_FROM" ]]; then
+    cache_args+=(--cache-from "$BUILDX_CACHE_FROM")
+  fi
+  if [[ -n "$BUILDX_CACHE_TO" ]]; then
+    cache_args+=(--cache-to "$BUILDX_CACHE_TO")
+  fi
+
   docker buildx build \
     --platform "$platform" \
     --file "$DOCKERFILE" \
     --build-arg ROOTFS_ARCH_LABEL="$arch_label" \
     --build-arg ENABLE_BROWSER_STACK="$ENABLE_BROWSER_STACK" \
+    "${cache_args[@]}" \
     --output "type=local,dest=$dest" \
     "$ROOT_DIR"
 }
