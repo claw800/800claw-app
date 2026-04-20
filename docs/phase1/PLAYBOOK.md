@@ -160,6 +160,7 @@ pip install --upgrade pip
 pip install "pdf2docx==0.5.12"
 pip install "markitdown[all]==0.1.5"
 pip install "nanobot-ai==0.1.4.post5"
+pip install "browser-use==0.12.2"
 
 ```
 

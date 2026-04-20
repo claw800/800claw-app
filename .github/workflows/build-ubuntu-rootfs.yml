@@ -7,14 +7,16 @@ on:
         description: "Install browser-use + Playwright Chromium stack"
         required: false
         default: "0"
-  push:
-    branches:
-      - master
-      - 'upgrade/**'
-    paths:
-      - 'tools/bootstrap/bake-ubuntu.Dockerfile'
-      - 'tools/bootstrap/bake-ubuntu.sh'
-      - '.github/workflows/build-ubuntu-rootfs.yml'
+  # NOTE(claw800): kept for future reference. Disabled for now to avoid expensive
+  # auto-runs on every matching push during Phase 2 iteration.
+  # push:
+  #   branches:
+  #     - master
+  #     - 'upgrade/**'
+  #   paths:
+  #     - 'tools/bootstrap/bake-ubuntu.Dockerfile'
+  #     - 'tools/bootstrap/bake-ubuntu.sh'
+  #     - '.github/workflows/build-ubuntu-rootfs.yml'
 
 jobs:
   build-rootfs:

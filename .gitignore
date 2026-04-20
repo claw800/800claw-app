@@ -27,6 +27,11 @@ keystore/
 *.p12
 signing.properties
 
+# claw800: keep generated bootstrap/rootfs artifacts out of git history.
+tools/bootstrap/output/
+app/src/main/assets/rootfs/*
+!app/src/main/assets/rootfs/.gitkeep
+
 # Intellij
 .idea/
 *.iml
