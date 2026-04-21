@@ -38,20 +38,45 @@ jobs:
       - name: Checkout claw800 fork
         uses: actions/checkout@v6
 
-      - name: Clone termux-packages
+      - name: Clone termux-packages and make the mount writable by any UID
         run: |
+          set -euo pipefail
           git clone --depth=1 https://github.com/termux/termux-packages.git termux-packages
-          # The termux-packages docker image runs as the "builder" user with
-          # UID 1000. GitHub-hosted runners own the workspace as UID 1001
-          # (runner). Without this chown, everything up to the final
-          # `mv ./bootstrap-<arch>.zip` works (build happens in
-          # container-owned tmp dirs), but that final move into the mounted
-          # repo directory fails with:
-          #   mv: cannot create regular file './bootstrap-aarch64.zip':
-          #   Permission denied
-          # Chowning the clone to 1000:1000 gives the container user write
-          # access to drop the finished zip back where we can pick it up.
-          sudo chown -R 1000:1000 termux-packages
+          # IMPORTANT (context for future readers):
+          #
+          # The termux/package-builder Docker image is built with
+          #     useradd -u 1001 -U -m builder
+          #     USER builder:builder
+          #     WORKDIR /home/builder/termux-packages
+          # i.e. the container's "builder" user is UID 1001 and CWD in
+          # docker exec is the mounted /home/builder/termux-packages dir.
+          #
+          # generate-bootstraps.sh finishes with:
+          #     mv -f "$BOOTSTRAP_TMPDIR/bootstrap-<arch>.zip" ./
+          # which lands inside the mount. If the host-side owner of that
+          # dir is any UID other than 1001, that mv fails with
+          #     mv: cannot create regular file './bootstrap-<arch>.zip':
+          #     Permission denied
+          #
+          # GitHub-hosted ubuntu runners are not guaranteed to be UID 1001
+          # (and empirically are not — the original and chown-to-1000
+          # variants both failed here). Rather than play the UID-matching
+          # game, make the cloned tree world-writable. This is a build
+          # scratch dir with no secrets; it's discarded when the job ends.
+          sudo chmod -R a+rwX termux-packages
+          echo "--- host runner id ---"
+          id
+          echo "--- termux-packages top-level (host view) ---"
+          ls -lan termux-packages | head -5
+
+      - name: Diagnose container user (one-time probe)
+        working-directory: termux-packages
+        run: |
+          # Prints the UID/GID the container sees and the top-level
+          # perms on the mounted dir, so future permission-denied
+          # failures can be diagnosed from the log alone.
+          ./scripts/run-docker.sh id
+          ./scripts/run-docker.sh sh -c 'ls -lan /home/builder/termux-packages | head -5'
 
       - name: Generate bootstrap zips with extra packages
         working-directory: termux-packages
@@ -68,15 +93,6 @@ jobs:
           ./scripts/run-docker.sh ./scripts/generate-bootstraps.sh \
             --architectures "${ARCHITECTURES}" \
             --add "${EXTRA_PACKAGES}"
-
-      - name: Restore ownership for post-docker steps
-        if: always()
-        run: |
-          # The zips and any artifacts produced in-container are now owned
-          # by UID 1000. Hand the tree back to the runner user so the
-          # Stage / Upload steps (and checkout cleanup) can read and move
-          # files without sudo.
-          sudo chown -R "$(id -u):$(id -g)" termux-packages
 
       - name: Stage output and compute checksums
         env:
