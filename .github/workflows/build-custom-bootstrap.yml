@@ -90,9 +90,39 @@ jobs:
           # run-docker.sh pulls the official termux-packages build image on the
           # first invocation and runs the given command inside it with the repo
           # mounted at /home/builder/termux-packages.
-          ./scripts/run-docker.sh ./scripts/generate-bootstraps.sh \
-            --architectures "${ARCHITECTURES}" \
-            --add "${EXTRA_PACKAGES}"
+          #
+          # IMPORTANT: run-docker.sh loads a *restricted* AppArmor profile
+          # (scripts/profile-restricted.apparmor) that contains:
+          #   deny /home/builder/termux-packages/[^o]** wlk
+          #   allow /home/builder/termux-packages/output/** rw
+          # i.e. the container may only write inside an output/ subdir
+          # of the mounted repo. generate-bootstraps.sh finishes with
+          #   mv -f "$BOOTSTRAP_TMPDIR/bootstrap-<arch>.zip" ./
+          # which lands wherever the caller's CWD is at that point.
+          # When we simply run ./scripts/run-docker.sh ./scripts/generate-bootstraps.sh,
+          # CWD in the container = WORKDIR = /home/builder/termux-packages,
+          # and the mv is vetoed by AppArmor as EACCES ("Permission denied")
+          # even though POSIX perms show 0777 and owner=1001 (the container
+          # user) — this was the mysterious failure we hit.
+          #
+          # Workaround: pre-create an output/ directory on the host and wrap
+          # the generate-bootstraps.sh invocation so its CWD inside the
+          # container is /home/builder/termux-packages/output. The wrapper
+          # is dropped into output/ itself (the only writable path), so it
+          # doesn't trip the deny rule when docker exec pulls it up.
+          mkdir -p output
+          cat > output/run-gen.sh <<'INNER_EOF'
+          #!/bin/bash
+          set -euo pipefail
+          cd /home/builder/termux-packages/output
+          ../scripts/generate-bootstraps.sh \
+            --architectures "$1" \
+            --add "$2"
+          INNER_EOF
+          chmod +x output/run-gen.sh
+          ./scripts/run-docker.sh /home/builder/termux-packages/output/run-gen.sh \
+            "${ARCHITECTURES}" \
+            "${EXTRA_PACKAGES}"
 
       - name: Stage output and compute checksums
         env:
@@ -102,16 +132,17 @@ jobs:
           set -euo pipefail
           OUT_ROOT="tools/bootstrap/output-custom/${PACKAGE_VARIANT}"
           mkdir -p "$OUT_ROOT"
-          # generate-bootstraps.sh writes bootstrap-<arch>.zip to the repo root.
+          # With the AppArmor workaround above, generate-bootstraps.sh now
+          # writes bootstrap-<arch>.zip into termux-packages/output/.
           shopt -s nullglob
           moved=0
-          for f in termux-packages/bootstrap-*.zip; do
+          for f in termux-packages/output/bootstrap-*.zip; do
             cp "$f" "$OUT_ROOT/"
             moved=$((moved+1))
           done
           if [[ $moved -eq 0 ]]; then
             echo "ERROR: no bootstrap-*.zip produced by generate-bootstraps.sh" >&2
-            ls -lah termux-packages || true
+            ls -lah termux-packages/output || true
             exit 1
           fi
           {
