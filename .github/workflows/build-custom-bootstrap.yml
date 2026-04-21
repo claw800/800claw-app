@@ -19,7 +19,11 @@ on:
       extra_packages:
         description: "Comma-separated extra packages to add to the bootstrap"
         required: false
-        default: "proot,proot-distro"
+        # mandoc is included so that update-alternatives postinst scripts
+        # (less, nano, cat, etc.) can find `makewhatis` and stop emitting
+        # "skipping updating manpage database" warnings during Termux
+        # bootstrap second-stage.
+        default: "proot,proot-distro,mandoc"
       architectures:
         description: "Comma-separated architectures (termux naming: aarch64,x86_64,arm,i686)"
         required: false
@@ -81,7 +85,7 @@ jobs:
       - name: Generate bootstrap zips with extra packages
         working-directory: termux-packages
         env:
-          EXTRA_PACKAGES: ${{ github.event.inputs.extra_packages || 'proot,proot-distro' }}
+          EXTRA_PACKAGES: ${{ github.event.inputs.extra_packages || 'proot,proot-distro,mandoc' }}
           ARCHITECTURES: ${{ github.event.inputs.architectures || 'aarch64,x86_64' }}
           PACKAGE_VARIANT: ${{ github.event.inputs.package_variant || 'apt-android-7' }}
         run: |
@@ -126,7 +130,7 @@ jobs:
 
       - name: Stage output and compute checksums
         env:
-          EXTRA_PACKAGES: ${{ github.event.inputs.extra_packages || 'proot,proot-distro' }}
+          EXTRA_PACKAGES: ${{ github.event.inputs.extra_packages || 'proot,proot-distro,mandoc' }}
           PACKAGE_VARIANT: ${{ github.event.inputs.package_variant || 'apt-android-7' }}
         run: |
           set -euo pipefail
