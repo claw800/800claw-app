@@ -210,8 +210,8 @@ def getPinnedBootstrapSpec() {
         return [
             version  : "2025.03.28-r1" + "+" + packageVariant,
             checksums: [
-                aarch64: "f42df5f24ef2bf0086d066ef790741626b6cd72dfa2977769710253a2edcab59",
-                x86_64 : "5d59bcc9a81d78336158ee6d76a6a35418eb68ea66152b91655504619f8328b8",
+                aarch64: "3b73e47d5ba0ab88532a299040f0617bdaf6e0aaf4b78542a2c3ed40e0e0b664",
+                x86_64 : "43dcf590b946e92dbef4824b34063cca1f821527a11405675bda82eeda84b884",
             ],
         ]
     } else if (packageVariant == "apt-android-5") {
