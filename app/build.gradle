@@ -197,21 +197,61 @@ def validateVersionName(String versionName) {
         throw new GradleException("The versionName '"  + versionName + "' is not a valid version as per semantic version '2.0.0' spec in the format 'major.minor.patch(-prerelease)(+buildmetadata)'. https://semver.org/spec/v2.0.0.html.")
 }
 
-def downloadBootstrap(String arch, String expectedChecksum, String version) {
-    def digest = java.security.MessageDigest.getInstance("SHA-256")
+// claw800: single source of truth for bootstrap SHA256 pins. Used by both
+// downloadBootstraps (fetch + verify) and the `clean` hook below (which keeps
+// a cached bootstrap-*.zip on disk when its checksum still matches, so
+// `./gradlew clean assembleDebug` doesn't force re-downloading big bootstrap
+// zips — particularly important when we're using locally-baked custom
+// bootstraps with proot pre-bundled, because those live only in our CI
+// artifact, not on Termux's upstream release URL).
+def getPinnedBootstrapSpec() {
+    def packageVariant = project.ext.packageVariant
+    if (packageVariant == "apt-android-7") {
+        return [
+            version  : "2025.03.28-r1" + "+" + packageVariant,
+            checksums: [
+                aarch64: "f42df5f24ef2bf0086d066ef790741626b6cd72dfa2977769710253a2edcab59",
+                x86_64 : "5d59bcc9a81d78336158ee6d76a6a35418eb68ea66152b91655504619f8328b8",
+            ],
+        ]
+    } else if (packageVariant == "apt-android-5") {
+        return [
+            version  : "2025.03.28-r3" + "+" + packageVariant,
+            checksums: [
+                aarch64: "147c98e610a30588665a89776314833c293006b12c70e65dcde6eb54c2344113",
+                x86_64 : "4f6866c222b0f1ae1b180220ffc6e8e1afbc10b9cbb7a462c062c490eda90044",
+            ],
+        ]
+    } else {
+        throw new GradleException("Unsupported TERMUX_PACKAGE_VARIANT \"" + packageVariant + "\"")
+    }
+}
 
-    def localUrl = "src/main/cpp/bootstrap-" + arch + ".zip"
-    def file = new File(projectDir, localUrl)
-    if (file.exists()) {
-        def buffer = new byte[8192]
-        def input = new FileInputStream(file)
+// claw800: compute SHA256 of a file. Returns a lowercase hex string padded
+// to 64 chars (matching the pins in getPinnedBootstrapSpec()).
+def sha256OfFile(File file) {
+    def digest = java.security.MessageDigest.getInstance("SHA-256")
+    def buffer = new byte[8192]
+    def input = new FileInputStream(file)
+    try {
         while (true) {
             def readBytes = input.read(buffer)
             if (readBytes < 0) break
             digest.update(buffer, 0, readBytes)
         }
-        def checksum = new BigInteger(1, digest.digest()).toString(16)
-        while (checksum.length() < 64) { checksum = "0" + checksum }
+    } finally {
+        input.close()
+    }
+    def checksum = new BigInteger(1, digest.digest()).toString(16)
+    while (checksum.length() < 64) { checksum = "0" + checksum }
+    return checksum
+}
+
+def downloadBootstrap(String arch, String expectedChecksum, String version) {
+    def localUrl = "src/main/cpp/bootstrap-" + arch + ".zip"
+    def file = new File(projectDir, localUrl)
+    if (file.exists()) {
+        def checksum = sha256OfFile(file)
         if (checksum == expectedChecksum) {
             return
         } else {
@@ -226,6 +266,7 @@ def downloadBootstrap(String arch, String expectedChecksum, String version) {
     file.parentFile.mkdirs()
     def out = new BufferedOutputStream(new FileOutputStream(file))
 
+    def digest = java.security.MessageDigest.getInstance("SHA-256")
     def connection = new URL(remoteUrl).openConnection()
     connection.setInstanceFollowRedirects(true)
     def digestStream = new java.security.DigestInputStream(connection.inputStream, digest)
@@ -242,26 +283,41 @@ def downloadBootstrap(String arch, String expectedChecksum, String version) {
 
 clean {
     doLast {
+        // claw800: only delete bootstrap-*.zip files whose SHA256 does NOT
+        // match the pinned value for the currently-selected packageVariant.
+        // Keeping valid cached zips across `./gradlew clean` avoids pointless
+        // re-downloads, and — critically — lets us keep using our custom
+        // bootstrap zips that have no upstream URL to fall back to.
+        def spec = getPinnedBootstrapSpec()
+        def pinnedChecksums = spec.checksums
         def tree = fileTree(new File(projectDir, 'src/main/cpp'))
         tree.include 'bootstrap-*.zip'
-        tree.each { it.delete() }
+        tree.each { f ->
+            def arch = f.name.replaceAll(/^bootstrap-/, '').replaceAll(/\.zip$/, '')
+            def expected = pinnedChecksums[arch]
+            if (expected == null) {
+                logger.quiet("clean: deleting unknown bootstrap file (no pinned SHA for arch '${arch}'): " + f)
+                f.delete()
+                return
+            }
+            def actual = sha256OfFile(f)
+            if (actual == expected) {
+                logger.quiet("clean: keeping cached bootstrap-${arch}.zip (SHA256 matches pinned value)")
+            } else {
+                logger.quiet("clean: deleting stale bootstrap-${arch}.zip (expected ${expected}, got ${actual})")
+                f.delete()
+            }
+        }
     }
 }
 
 task downloadBootstraps() {
     doLast {
-        def packageVariant = project.ext.packageVariant
-        if (packageVariant == "apt-android-7") {
-            def version =  "2025.03.28-r1" + "+" + packageVariant
-            downloadBootstrap("aarch64", "c8d702b6f742935001c37cda81b8ac69504a95d5cf28f2899532dd8cd4b057eb", version)
-            downloadBootstrap("x86_64",  "1c124ec2396ee70a51b0b0a574f29aa659526aa2b9f558f993b2fb05d1e51855", version)
-        } else if (packageVariant == "apt-android-5") {
-            def version = "2025.03.28-r3" + "+" + packageVariant
-            downloadBootstrap("aarch64", "147c98e610a30588665a89776314833c293006b12c70e65dcde6eb54c2344113", version)
-            downloadBootstrap("x86_64", "4f6866c222b0f1ae1b180220ffc6e8e1afbc10b9cbb7a462c062c490eda90044", version)
-        } else {
-            throw new GradleException("Unsupported TERMUX_PACKAGE_VARIANT \"" + packageVariant + "\"")
-        }
+        def spec = getPinnedBootstrapSpec()
+        def version = spec.version
+        def checksums = spec.checksums
+        downloadBootstrap("aarch64", checksums.aarch64, version)
+        downloadBootstrap("x86_64",  checksums.x86_64,  version)
     }
 }
 

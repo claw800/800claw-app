@@ -29,6 +29,8 @@ signing.properties
 
 # claw800: keep generated bootstrap/rootfs artifacts out of git history.
 tools/bootstrap/output/
+tools/bootstrap/output-custom/
+tools/bootstrap/build-custom/
 app/src/main/assets/rootfs/*
 !app/src/main/assets/rootfs/.gitkeep
 

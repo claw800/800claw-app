@@ -3,7 +3,9 @@ param(
     [string]$Arch = "all",
 
     [string]$Source = "",
-    [string]$Dest = ""
+    [string]$Dest = "",
+
+    [switch]$CleanDest
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,6 +69,18 @@ function Copy-OptionalMetadata([string]$metadataRoot, [string]$destMetadataRoot)
     }
 }
 
+function Clear-DestinationForArch([string]$destRoot, [string]$arch) {
+    $destTar = Join-Path $destRoot ("ubuntu-noble-{0}.tar.xz" -f $arch)
+    if (Test-Path -LiteralPath $destTar) {
+        Remove-Item -LiteralPath $destTar -Force
+    }
+
+    $destMetaDir = Join-Path (Join-Path $destRoot "metadata") $arch
+    if (Test-Path -LiteralPath $destMetaDir) {
+        Remove-Item -LiteralPath $destMetaDir -Recurse -Force
+    }
+}
+
 $repoRoot = Resolve-RepoRoot
 if ([string]::IsNullOrWhiteSpace($Source)) {
     $Source = Join-Path $repoRoot "tools\bootstrap\output\rootfs"
@@ -85,6 +99,11 @@ Ensure-Dir (Join-Path $Dest "metadata")
 $archList = if ($Arch -eq "all") { @("arm64-v8a", "x86_64") } else { @($Arch) }
 
 foreach ($currentArch in $archList) {
+    if ($CleanDest) {
+        Write-Host ("Cleaning destination for arch: {0}" -f $currentArch) -ForegroundColor Yellow
+        Clear-DestinationForArch -destRoot $Dest -arch $currentArch
+    }
+
     $result = Find-Tarball -basePath $Source -arch $currentArch
     $targetTarball = Join-Path $Dest ("ubuntu-noble-{0}.tar.xz" -f $currentArch)
 
