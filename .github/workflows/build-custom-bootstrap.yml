@@ -128,6 +128,93 @@ jobs:
             "${ARCHITECTURES}" \
             "${EXTRA_PACKAGES}"
 
+      - name: Silence one-time bootstrap second-stage terminal output
+        working-directory: termux-packages/output
+        run: |
+          set -euo pipefail
+          # The Termux bootstrap runs a "second stage" exactly once per
+          # $PREFIX lifetime: it walks $PREFIX/var/lib/dpkg/info/*.postinst
+          # and runs each package's postinst, because TermuxInstaller
+          # manually extracts .debs instead of going through dpkg.
+          #
+          # That second stage has two entry points:
+          #   1) Primary: TermuxInstaller.java -> AppShell.execute(
+          #        $PREFIX/etc/termux/bootstrap/termux-bootstrap-second-stage.sh)
+          #      Output is captured to Android logcat, not the terminal.
+          #   2) Fallback: $PREFIX/etc/profile.d/
+          #        01-termux-bootstrap-second-stage-fallback.sh
+          #      Sourced by /etc/profile on first login shell. If the
+          #      second-stage lock symlink is missing, it runs the second
+          #      stage inline and prints to the active terminal:
+          #         Starting fallback run of termux bootstrap second stage
+          #         [*] Running termux bootstrap second stage
+          #         [*] Running 'coreutils' package postinst
+          #         update-alternatives: using ...
+          #         ...
+          #         [*] The termux bootstrap second stage completed successfully
+          #      After completion the fallback script rm -f's itself.
+          #
+          # For the claw800 PoC we want a clean first-launch terminal, so
+          # we patch only the fallback wrapper inside each bootstrap zip:
+          #   (a) drop the "Starting fallback run..." echo, and
+          #   (b) redirect the second-stage invocation to /dev/null.
+          # termux-bootstrap-second-stage.sh itself is left untouched, so
+          # TermuxInstaller's primary run keeps its diagnostic output in
+          # logcat for crash-debugging, and the self-deletion of the
+          # fallback script after a successful run is preserved exactly
+          # as upstream.
+          shopt -s nullglob
+          zips=( bootstrap-*.zip )
+          if [[ ${#zips[@]} -eq 0 ]]; then
+            echo "ERROR: no bootstrap-*.zip to patch" >&2
+            exit 1
+          fi
+          for zip_name in "${zips[@]}"; do
+            echo "--- Patching $zip_name ---"
+            zipabs="$PWD/$zip_name"
+            # Resolve the exact entry name inside the zip (zip may or may
+            # not preserve a leading ./ prefix depending on how it was
+            # built upstream).
+            entry="$(unzip -Z1 "$zipabs" \
+              | grep -E '(^|/)etc/profile\.d/01-termux-bootstrap-second-stage-fallback\.sh$' \
+              | head -1 || true)"
+            if [[ -z "$entry" ]]; then
+              echo "ERROR: profile.d fallback script not found in $zip_name" >&2
+              echo "--- zip listing (head) ---" >&2
+              unzip -Z1 "$zipabs" | head -40 >&2 || true
+              exit 1
+            fi
+            echo "Found entry: $entry"
+            tmpdir="$(mktemp -d)"
+            ( cd "$tmpdir" && unzip -q "$zipabs" "$entry" )
+            f="$tmpdir/$entry"
+            echo "--- Before patch ---"
+            grep -nE 'Starting fallback|termux-bootstrap-second-stage\.sh"' "$f" || true
+            # Patch 1: delete the "Starting fallback run ..." echo.
+            # Patch 2: redirect the second-stage invocation to /dev/null.
+            # The chmod +x line also contains second-stage.sh"|| exit, but
+            # starts with `chmod `, so our ^<ws>"..." anchor skips it.
+            sed -i \
+              -e '/Starting fallback run of termux bootstrap second stage/d' \
+              -e 's|^\([[:space:]]*\)"\([^"]*/termux-bootstrap-second-stage\.sh\)" || exit|\1"\2" >/dev/null 2>\&1 || exit|' \
+              "$f"
+            chmod 600 "$f"
+            echo "--- After patch ---"
+            grep -nE 'Starting fallback|termux-bootstrap-second-stage\.sh"' "$f" \
+              || echo "(echo removed; second-stage invocation line present above)"
+            # Sanity: invocation line must now be redirected.
+            if ! grep -qE '"[^"]*/termux-bootstrap-second-stage\.sh" >/dev/null 2>&1' "$f"; then
+              echo "ERROR: invocation redirect patch did not take effect in $zip_name" >&2
+              cat "$f" >&2
+              exit 1
+            fi
+            # Replace the entry in the original zip. `zip` updates
+            # entries in place by path and preserves all other entries.
+            ( cd "$tmpdir" && zip -q "$zipabs" "$entry" )
+            rm -rf "$tmpdir"
+            echo "Patched $zip_name ($entry)"
+          done
+
       - name: Stage output and compute checksums
         env:
           EXTRA_PACKAGES: ${{ github.event.inputs.extra_packages || 'proot,proot-distro,mandoc' }}
