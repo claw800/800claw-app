@@ -90,49 +90,26 @@ RUN mkdir -p /output && \
     python3 --version > /output/python-version.txt && \
     node --version > /output/node-version.txt
 
-# 8) Guest-side runtime tweaks applied to the rootfs before packing.
+# NOTE: Guest hygiene tweaks (disable NodeSource apt source, swap Ubuntu
+# mirrors to Aliyun, install canonical /etc/resolv.conf) are intentionally
+# NOT applied here. They live in app/src/main/java/com/termux/app/
+# ClawRuntimeBootstrap.java and run at first-launch on the Android side,
+# right after the rootfs tarball is extracted.
 #
-#    a) Disable the NodeSource apt source now that Node 22 is installed.
-#       Leaving it active would force end users to hit NodeSource's repo
-#       churn (key rotations, suite renames) every time they run apt-get
-#       inside the proot guest. We preserve the file as .bak for reference.
+# Two reasons:
+#   1) Docker BuildKit bind-mounts /etc/resolv.conf (and /etc/hostname,
+#      /etc/hosts) into every RUN step so DNS works during the build. You
+#      cannot rm a bind-mounted file (EBUSY), and writes to the bind do
+#      not persist into the image layer, so baking /etc/resolv.conf
+#      inside this Dockerfile is fundamentally impossible.
+#   2) All three tweaks are pure file edits on the extracted rootfs with
+#      no dependency on bake-time state. Keeping them in Java avoids a
+#      ~1.5 h CI round-trip whenever we tune mirrors or nameservers.
 #
-#    b) Swap Ubuntu archive/security mirrors to Aliyun. Users in CN see a
-#       large `apt-get update` speed-up; users outside CN can still reach
-#       Aliyun at respectable speeds, or edit the file themselves.
-#
-#    c) Replace /etc/resolv.conf with a real file. Under proot-distro
-#       there is no systemd-resolved running (Ubuntu's default resolv.conf
-#       symlink into /run/systemd/resolve/ is dead), so /etc/resolv.conf
-#       is authoritative. We seed it with Aliyun public DNS plus a Google
-#       fallback so fresh installs resolve names without user setup.
-RUN <<'POST_BAKE'
-set -eux
+# See ClawRuntimeBootstrap#disableNodeSourceAptRepo, #switchAptMirrorsToAliyun,
+# and #writeGuestResolvConf for the actual logic.
 
-if [ -f /etc/apt/sources.list.d/nodesource.sources ]; then
-    mv /etc/apt/sources.list.d/nodesource.sources /etc/apt/sources.list.d/nodesource.sources.bak
-fi
-
-if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-    cp -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak
-    sed -Ei \
-        -e 's|https?://archive\.ubuntu\.com/ubuntu/?|https://mirrors.aliyun.com/ubuntu/|g' \
-        -e 's|https?://security\.ubuntu\.com/ubuntu/?|https://mirrors.aliyun.com/ubuntu/|g' \
-        /etc/apt/sources.list.d/ubuntu.sources
-fi
-
-rm -f /etc/resolv.conf
-cat > /etc/resolv.conf <<'RESOLV'
-# Baked by claw800. proot-distro guests do not run systemd-resolved,
-# so /etc/resolv.conf here is authoritative.
-nameserver 223.5.5.5
-nameserver 223.6.6.6
-nameserver 8.8.8.8
-RESOLV
-chmod 644 /etc/resolv.conf
-POST_BAKE
-
-# 9) Pack rootfs tarball.
+# 8) Pack rootfs tarball.
 #    ROOTFS_ARCH_LABEL is provided by the build script/workflow as arm64-v8a or x86_64.
 # NOTE: --hard-dereference is REQUIRED for Android.
 # Android app-private storage (/data/data/<pkg>/...) does not allow

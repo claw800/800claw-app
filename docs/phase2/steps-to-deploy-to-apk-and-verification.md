@@ -79,9 +79,26 @@ Success criteria:
 - `.../var/lib/proot-distro/installed-rootfs/claw800/tmp` is mode `1777`; `/proc` and `/sys` are mode `555`; `.l2s/` directory exists
 - `.../etc/proot-distro/claw800.sh` exists with `DISTRO_NAME="Claw800 Ubuntu"`
 - bootstrap log contains `registering Android-specific UIDs/GIDs ...` and the guest's `/etc/group` has `aid_*` lines for the Termux supplemental GIDs (see step 6 note)
+- bootstrap log contains, in order:
+  - `disabling NodeSource apt source in guest (rename to .bak)`
+  - `switching guest Ubuntu apt mirrors to Aliyun`
+  - `writing guest /etc/resolv.conf with claw800 nameservers`
 
-Rootfs hygiene (baked-in, confirm after first login):
+Rootfs hygiene (applied as Android-side first-launch tweaks, confirm after first login):
+
+These three tweaks are performed by `ClawRuntimeBootstrap` right after the
+rootfs tarball is extracted, NOT inside `tools/bootstrap/bake-ubuntu.Dockerfile`.
+We moved them off the bake because Docker BuildKit bind-mounts `/etc/resolv.conf`
+during `RUN` (you cannot `rm` a bind-mounted file, and writes to the bind do
+not persist into the image layer), so `/etc/resolv.conf` is literally impossible
+to bake. All three are pure file edits with no bake-time dependency, so keeping
+them in Java is also ~1.5 h faster to iterate on than a rootfs CI rebuild.
+
 - `cat /etc/resolv.conf` → lists `223.5.5.5`, `223.6.6.6`, `8.8.8.8`
+  - Written fresh on every rootfs (re)install by `writeGuestResolvConf`.
+    The upstream Ubuntu Noble `/etc/resolv.conf` is a symlink to
+    `/run/systemd/resolve/stub-resolv.conf`; the bootstrap `rm -f`'s that
+    dangling symlink before writing the real file.
 - `ls /etc/apt/sources.list.d/` → `ubuntu.sources`, `ubuntu.sources.bak`, `nodesource.sources.bak` (note the `.bak` on NodeSource)
 - `grep -c aliyun /etc/apt/sources.list.d/ubuntu.sources` → non-zero
 - `grep ^aid_ /etc/group | wc -l` → non-zero

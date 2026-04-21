@@ -110,6 +110,9 @@ final class ClawRuntimeBootstrap {
                 copyAssetToStaging(activity, resolveAssetNameForDevice());
                 extractStagedRootfs();
                 applyPostInstallFixups();
+                disableNodeSourceAptRepo();
+                switchAptMirrorsToAliyun();
+                writeGuestResolvConf();
                 registerAndroidAids();
                 writeProotDistroPlugin();
                 writeSentinel();
@@ -384,6 +387,119 @@ final class ClawRuntimeBootstrap {
             "done\n" +
             "\n" +
             "rm -f \"$gnames_file\" \"$gids_file\"\n";
+
+        runShell(script);
+    }
+
+    /**
+     * Guest hygiene tweaks run as first-launch fixups rather than at rootfs
+     * bake time.
+     *
+     * <p>Historically we applied these three tweaks inside
+     * {@code tools/bootstrap/bake-ubuntu.Dockerfile} as a {@code POST_BAKE}
+     * {@code RUN} block. That was clean for the apt-source edits but not
+     * workable for {@code /etc/resolv.conf}: Docker BuildKit bind-mounts
+     * {@code /etc/resolv.conf} (and {@code /etc/hostname}, {@code /etc/hosts})
+     * into every {@code RUN} step so DNS works during the build, which means
+     *
+     * <ul>
+     *   <li>{@code rm -f /etc/resolv.conf} fails with EBUSY ("Device or
+     *       resource busy") because you cannot unlink a bind-mounted file,
+     *       and</li>
+     *   <li>even a direct {@code cat > /etc/resolv.conf} hits the bind, not
+     *       the image layer, and is discarded at RUN boundary so the
+     *       subsequent {@code tar} step never ships our content.</li>
+     * </ul>
+     *
+     * <p>Moving the three tweaks here uniformly:
+     *
+     * <ul>
+     *   <li>removes the BuildKit gotcha entirely (no binds on this side);</li>
+     *   <li>lets us iterate on hygiene without a 1.5&nbsp;h rootfs rebuild
+     *       and CI round-trip;</li>
+     *   <li>keeps all first-launch rootfs mutations in one place next to the
+     *       existing {@link #applyPostInstallFixups()} and
+     *       {@link #registerAndroidAids()} methods; and</li>
+     *   <li>makes the tweaks idempotent by design (they run on every
+     *       install, so a re-extracted rootfs picks them up immediately).</li>
+     * </ul>
+     */
+
+    /**
+     * Disables the NodeSource apt source inside the rootfs by renaming the
+     * sources file to {@code .bak}. Node 22 is already installed at bake
+     * time; leaving the source active would force the guest to hit
+     * NodeSource's repo churn (key rotations, suite renames) on every
+     * {@code apt-get update}. Idempotent.
+     */
+    private static void disableNodeSourceAptRepo() throws Exception {
+        logToFile("disabling NodeSource apt source in guest (rename to .bak)");
+
+        String script =
+            "set -eu\n" +
+            "ROOT='" + ROOTFS_INSTALL_DIR_PATH + "'\n" +
+            "src=\"$ROOT/etc/apt/sources.list.d/nodesource.sources\"\n" +
+            "if [ -f \"$src\" ]; then\n" +
+            "  mv \"$src\" \"$src.bak\"\n" +
+            "fi\n";
+
+        runShell(script);
+    }
+
+    /**
+     * Swaps {@code archive.ubuntu.com} and {@code security.ubuntu.com} to
+     * Aliyun's Ubuntu mirror inside {@code /etc/apt/sources.list.d/ubuntu.sources}.
+     * Users in CN see a large {@code apt-get update} speed-up; users
+     * elsewhere can still reach Aliyun at respectable speeds, or edit the
+     * file themselves. The original file is preserved as {@code .bak}.
+     * Idempotent.
+     */
+    private static void switchAptMirrorsToAliyun() throws Exception {
+        logToFile("switching guest Ubuntu apt mirrors to Aliyun");
+
+        String script =
+            "set -eu\n" +
+            "ROOT='" + ROOTFS_INSTALL_DIR_PATH + "'\n" +
+            "src=\"$ROOT/etc/apt/sources.list.d/ubuntu.sources\"\n" +
+            "if [ -f \"$src\" ]; then\n" +
+            "  # Keep a one-time snapshot of the upstream sources for fallback.\n" +
+            "  [ -f \"$src.bak\" ] || cp -f \"$src\" \"$src.bak\"\n" +
+            "  sed -Ei \\\n" +
+            "    -e 's|https?://archive\\.ubuntu\\.com/ubuntu/?|https://mirrors.aliyun.com/ubuntu/|g' \\\n" +
+            "    -e 's|https?://security\\.ubuntu\\.com/ubuntu/?|https://mirrors.aliyun.com/ubuntu/|g' \\\n" +
+            "    \"$src\"\n" +
+            "fi\n";
+
+        runShell(script);
+    }
+
+    /**
+     * Writes {@code $ROOTFS/etc/resolv.conf} with the canonical claw800
+     * nameservers (Aliyun public DNS + Google fallback).
+     *
+     * <p>Ubuntu Noble ships {@code /etc/resolv.conf} as a symlink to
+     * {@code /run/systemd/resolve/stub-resolv.conf}. Under proot-distro
+     * there is no systemd-resolved running, so that symlink is dangling and
+     * {@code /etc/resolv.conf} is authoritative inside the guest. We
+     * {@code rm -f} the symlink first so the subsequent write creates a
+     * real regular file rather than following the dangling link.
+     */
+    private static void writeGuestResolvConf() throws Exception {
+        logToFile("writing guest /etc/resolv.conf with claw800 nameservers");
+
+        String script =
+            "set -eu\n" +
+            "ROOT='" + ROOTFS_INSTALL_DIR_PATH + "'\n" +
+            "rm -f \"$ROOT/etc/resolv.conf\"\n" +
+            "cat > \"$ROOT/etc/resolv.conf\" <<'RESOLV'\n" +
+            "# Written by claw800 ClawRuntimeBootstrap at first-launch.\n" +
+            "# proot-distro guests do not run systemd-resolved, so this file\n" +
+            "# is authoritative. Edit freely inside the guest if needed.\n" +
+            "nameserver 223.5.5.5\n" +
+            "nameserver 223.6.6.6\n" +
+            "nameserver 8.8.8.8\n" +
+            "RESOLV\n" +
+            "chmod 644 \"$ROOT/etc/resolv.conf\"\n";
 
         runShell(script);
     }
