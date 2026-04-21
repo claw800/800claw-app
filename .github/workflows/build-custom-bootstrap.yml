@@ -194,9 +194,12 @@ jobs:
             # Patch 2: redirect the second-stage invocation to /dev/null.
             # The chmod +x line also contains second-stage.sh"|| exit, but
             # starts with `chmod `, so our ^<ws>"..." anchor skips it.
+            # NOTE: the sed s/// delimiter is `#` (not `|`), because the
+            # pattern itself contains `||` from `|| exit $?` which would
+            # otherwise terminate the search part prematurely.
             sed -i \
               -e '/Starting fallback run of termux bootstrap second stage/d' \
-              -e 's|^\([[:space:]]*\)"\([^"]*/termux-bootstrap-second-stage\.sh\)" || exit|\1"\2" >/dev/null 2>\&1 || exit|' \
+              -e 's#^\([[:space:]]*\)"\([^"]*/termux-bootstrap-second-stage\.sh\)" || exit#\1"\2" >/dev/null 2>\&1 || exit#' \
               "$f"
             chmod 600 "$f"
             echo "--- After patch ---"
