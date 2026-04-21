@@ -41,6 +41,17 @@ jobs:
       - name: Clone termux-packages
         run: |
           git clone --depth=1 https://github.com/termux/termux-packages.git termux-packages
+          # The termux-packages docker image runs as the "builder" user with
+          # UID 1000. GitHub-hosted runners own the workspace as UID 1001
+          # (runner). Without this chown, everything up to the final
+          # `mv ./bootstrap-<arch>.zip` works (build happens in
+          # container-owned tmp dirs), but that final move into the mounted
+          # repo directory fails with:
+          #   mv: cannot create regular file './bootstrap-aarch64.zip':
+          #   Permission denied
+          # Chowning the clone to 1000:1000 gives the container user write
+          # access to drop the finished zip back where we can pick it up.
+          sudo chown -R 1000:1000 termux-packages
 
       - name: Generate bootstrap zips with extra packages
         working-directory: termux-packages
@@ -57,6 +68,15 @@ jobs:
           ./scripts/run-docker.sh ./scripts/generate-bootstraps.sh \
             --architectures "${ARCHITECTURES}" \
             --add "${EXTRA_PACKAGES}"
+
+      - name: Restore ownership for post-docker steps
+        if: always()
+        run: |
+          # The zips and any artifacts produced in-container are now owned
+          # by UID 1000. Hand the tree back to the runner user so the
+          # Stage / Upload steps (and checkout cleanup) can read and move
+          # files without sudo.
+          sudo chown -R "$(id -u):$(id -g)" termux-packages
 
       - name: Stage output and compute checksums
         env:
