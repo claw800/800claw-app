@@ -206,6 +206,24 @@
             </intent-filter>
         </service>
 
+        <service
+            android:name=".app.ClawRuntimeControlService"
+            android:exported="true"
+            android:foregroundServiceType="dataSync"
+            android:permission="${TERMUX_PACKAGE_NAME}.permission.RUN_COMMAND">
+            <intent-filter>
+                <action android:name="dev.claw800.runtime.NANOBOT_START" />
+                <action android:name="dev.claw800.runtime.NANOBOT_STOP" />
+                <action android:name="dev.claw800.runtime.NANOBOT_RESTART" />
+                <action android:name="dev.claw800.runtime.NANOBOT_STATUS" />
+                <action android:name="dev.claw800.runtime.RUNTIME_STATUS" />
+                <action android:name="dev.claw800.runtime.CONFIG_READ" />
+                <action android:name="dev.claw800.runtime.CONFIG_WRITE" />
+                <action android:name="dev.claw800.runtime.LOG_TAIL" />
+                <action android:name="dev.claw800.runtime.ENSURE_AUTOSTART" />
+            </intent-filter>
+        </service>
+
 
         <!-- This (or rather, value 2.1 or higher) is needed to make the Samsung Galaxy S8 mark the
         app with "This app is optimized to run in full screen." -->

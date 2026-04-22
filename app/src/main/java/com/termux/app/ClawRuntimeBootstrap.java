@@ -76,10 +76,11 @@ final class ClawRuntimeBootstrap {
         if (isRootfsReady()) {
             try {
                 ensureRootfsEnterScript();
+                ensureAllowExternalAppsEnabled();
             } catch (Exception e) {
                 // Do not block app startup for existing installs; user can still proceed.
                 Logger.logStackTraceWithMessage(LOG_TAG, "Failed to refresh claw800-enter script", e);
-                logToFile("warning: failed to refresh claw800-enter script: " + e.getMessage());
+                logToFile("warning: failed to refresh claw800-enter script / allow-external-apps policy: " + e.getMessage());
             }
             whenDone.run();
             return;
@@ -117,6 +118,7 @@ final class ClawRuntimeBootstrap {
                 writeProotDistroPlugin();
                 writeSentinel();
                 ensureRootfsEnterScript();
+                ensureAllowExternalAppsEnabled();
 
                 if (!isRootfsReady()) {
                     throw new RuntimeException("Rootfs install completed but verification failed.");
@@ -500,6 +502,31 @@ final class ClawRuntimeBootstrap {
             "nameserver 8.8.8.8\n" +
             "RESOLV\n" +
             "chmod 644 \"$ROOT/etc/resolv.conf\"\n";
+
+        runShell(script);
+    }
+
+    /**
+     * Ensures RUN_COMMAND-style APIs are usable by the RN management app.
+     *
+     * <p>The setting lives in {@code ~/.termux/termux.properties} as
+     * {@code allow-external-apps=true}. We patch it idempotently:
+     * replace existing line if present, otherwise append a new one.
+     */
+    private static void ensureAllowExternalAppsEnabled() throws Exception {
+        logToFile("ensuring termux.properties sets allow-external-apps=true");
+
+        String propFile = TermuxConstants.TERMUX_PROPERTIES_PRIMARY_FILE_PATH;
+        String script =
+            "set -eu\n" +
+            "f='" + propFile + "'\n" +
+            "mkdir -p \"$(dirname \"$f\")\"\n" +
+            "touch \"$f\"\n" +
+            "if grep -q '^allow-external-apps=' \"$f\" 2>/dev/null; then\n" +
+            "  sed -Ei 's/^allow-external-apps=.*/allow-external-apps=true/' \"$f\"\n" +
+            "else\n" +
+            "  printf '\\nallow-external-apps=true\\n' >> \"$f\"\n" +
+            "fi\n";
 
         runShell(script);
     }

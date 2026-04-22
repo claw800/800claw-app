@@ -400,6 +400,9 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
                     if (mTermuxService == null) return; // Activity might have been destroyed.
                     ClawRuntimeBootstrap.setupRootfsIfNeeded(TermuxActivity.this, () -> {
                         if (mTermuxService == null) return; // Activity might have been destroyed.
+                        // PoC behavior: app launch should ensure nanobot service is started
+                        // when rootfs + config are ready (no boot-completed autostart yet).
+                        ClawRuntimeControlService.ensureNanobotAutostart(TermuxActivity.this);
                         try {
                             boolean launchFailsafe = false;
                             if (intent != null && intent.getExtras() != null) {
