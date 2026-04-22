@@ -9,7 +9,9 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import android.os.ResultReceiver;
+import android.os.Message;
+import android.os.Messenger;
+import android.os.RemoteException;
 
 import androidx.annotation.Nullable;
 
@@ -60,7 +62,7 @@ public class ClawRuntimeControlService extends Service {
     public static final String ACTION_ENSURE_AUTOSTART = "dev.claw800.runtime.ENSURE_AUTOSTART";
 
     public static final String EXTRA_CALLER_PACKAGE = "dev.claw800.runtime.extra.CALLER_PACKAGE";
-    public static final String EXTRA_RESULT_RECEIVER = "dev.claw800.runtime.extra.RESULT_RECEIVER";
+    public static final String EXTRA_RESULT_MESSENGER = "dev.claw800.runtime.extra.RESULT_MESSENGER";
     public static final String EXTRA_CONFIG_JSON = "dev.claw800.runtime.extra.CONFIG_JSON";
     public static final String EXTRA_LOG_LINES = "dev.claw800.runtime.extra.LOG_LINES";
 
@@ -96,7 +98,7 @@ public class ClawRuntimeControlService extends Service {
     private static String sNanobotLastError = "";
 
     private static final Set<String> ALLOWED_CALLER_PACKAGES = new HashSet<>(
-        Arrays.asList("com.claw800.ui", "dev.claw800.ui")
+        Arrays.asList("com.claw800.ui", "com.claw800.runtime", "com.claw800.app", "dev.claw800.ui", "dev.claw800.runtime", "dev.claw800.app")
     );
 
     private final Handler mMainHandler = new Handler(Looper.getMainLooper());
@@ -112,6 +114,14 @@ public class ClawRuntimeControlService extends Service {
         if (intent == null) return START_NOT_STICKY;
         String action = intent.getAction();
         if (action == null || action.isEmpty()) return START_NOT_STICKY;
+
+        if (!ACTION_ENSURE_AUTOSTART.equals(action)) {
+            // External calls can happen while caller app transitions
+            // foreground/background (permission dialogs, recreation). Promote
+            // early to foreground so Android does not reject start from
+            // background-restricted state.
+            startForegroundIfNeeded();
+        }
 
         if (ACTION_ENSURE_AUTOSTART.equals(action)) {
             // `nanobot onboard` can take noticeable time on first run. Keep this
@@ -632,17 +642,30 @@ public class ClawRuntimeControlService extends Service {
     }
 
     private void sendResultBundle(Intent requestIntent, int code, Bundle bundle) {
-        ResultReceiver receiver = requestIntent.getParcelableExtra(EXTRA_RESULT_RECEIVER);
-        if (receiver == null) return;
+        Messenger messenger;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            messenger = requestIntent.getParcelableExtra(EXTRA_RESULT_MESSENGER, Messenger.class);
+        } else {
+            messenger = requestIntent.getParcelableExtra(EXTRA_RESULT_MESSENGER);
+        }
+        if (messenger == null) return;
         try {
-            receiver.send(code, bundle);
-        } catch (RuntimeException e) {
-            Logger.logStackTraceWithMessage(LOG_TAG, "Failed sending ResultReceiver callback", e);
+            Message msg = Message.obtain();
+            msg.what = code;
+            msg.setData(bundle);
+            messenger.send(msg);
+        } catch (RemoteException | RuntimeException e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed sending Messenger callback", e);
         }
     }
 
     private int maybeStopSelf() {
-        if (!isNanobotRunning()) stopSelf();
+        if (!isNanobotRunning()) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                stopForeground(true);
+            }
+            stopSelf();
+        }
         return START_NOT_STICKY;
     }
 

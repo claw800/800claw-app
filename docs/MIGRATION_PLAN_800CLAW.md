@@ -265,7 +265,7 @@ This is exactly the IPC surface we want. Key extras supported by `RunCommandServ
 1. Flip `app/src/main/res/xml/com.termux.app.properties` (or wherever `allow-external-apps` lives — one of the files found by grep under `termux-shared/.../TermuxPropertyConstants.java`) to `true`. Without this, `RunCommandService` rejects all external intents.
 2. Declare a claw800-specific action alongside `RUN_COMMAND`: `dev.claw800.runtime.EXEC`. Keep `RUN_COMMAND` too for debugging from adb.
 3. Lock the permission name to `com.termux.permission.RUN_COMMAND` (because §2.1 keeps `com.termux` as `applicationId`). The RN UI APK must `<uses-permission>` it.
-4. Harden: reject intents whose `callingPackage` is not `com.claw800.ui` (the RN UI APK's applicationId). Add a whitelist check in `RunCommandService.onStartCommand()`.
+4. Harden: reject intents whose `callingPackage` is not `com.claw800.ui`, `com.claw800.runtime`, `com.claw800.app`, `dev.claw800.ui`, `dev.claw800.runtime`, `dev.claw800.app` (the RN UI APK's applicationId). Add a whitelist check in `RunCommandService.onStartCommand()`.
 
 ### 7.3 — RN UI side changes (in `800claw` repo)
 
