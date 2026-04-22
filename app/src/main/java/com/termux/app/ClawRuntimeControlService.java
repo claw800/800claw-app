@@ -113,8 +113,29 @@ public class ClawRuntimeControlService extends Service {
         String action = intent.getAction();
         if (action == null || action.isEmpty()) return START_NOT_STICKY;
 
+        if (ACTION_ENSURE_AUTOSTART.equals(action)) {
+            // `nanobot onboard` can take noticeable time on first run. Keep this
+            // path off the main thread to avoid UI jank/ANR risk when app launch
+            // triggers ensure-autostart.
+            final Intent requestIntent = intent;
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        handleEnsureAutostart(requestIntent);
+                    } catch (Exception e) {
+                        Logger.logStackTraceWithMessage(LOG_TAG, "runtime control action failed: " + ACTION_ENSURE_AUTOSTART, e);
+                        sendFailureResult(requestIntent, ACTION_ENSURE_AUTOSTART, e.getMessage() != null ? e.getMessage() : "Unknown error");
+                    } finally {
+                        if (!isNanobotRunning()) stopSelf();
+                    }
+                }
+            }, "claw800-ensure-autostart").start();
+            return START_NOT_STICKY;
+        }
+
         try {
-            if (!ACTION_ENSURE_AUTOSTART.equals(action) && !isAllowedCaller(intent)) {
+            if (!isAllowedCaller(intent)) {
                 sendFailureResult(intent, action, "Caller package is not in allowlist.");
                 return maybeStopSelf();
             }
@@ -135,8 +156,6 @@ public class ClawRuntimeControlService extends Service {
                 handleConfigWrite(intent);
             } else if (ACTION_LOG_TAIL.equals(action)) {
                 handleLogTail(intent);
-            } else if (ACTION_ENSURE_AUTOSTART.equals(action)) {
-                handleEnsureAutostart(intent);
             } else {
                 sendFailureResult(intent, action, "Unsupported action: " + action);
             }
@@ -157,21 +176,27 @@ public class ClawRuntimeControlService extends Service {
     public static void ensureNanobotAutostart(Service ownerService) {
         Intent i = new Intent(ownerService, ClawRuntimeControlService.class);
         i.setAction(ACTION_ENSURE_AUTOSTART);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            ownerService.startForegroundService(i);
-        } else {
-            ownerService.startService(i);
-        }
+        // IMPORTANT:
+        // Do NOT use startForegroundService() for this probe action.
+        //
+        // ACTION_ENSURE_AUTOSTART often becomes a no-op when rootfs/config is
+        // not ready yet, in which case this service may return quickly without
+        // transitioning to foreground. If started with
+        // Context.startForegroundService(), Android expects startForeground()
+        // within a strict timeout and kills the app with
+        // ForegroundServiceDidNotStartInTimeException otherwise.
+        //
+        // We intentionally start as a normal service here; if nanobot is
+        // actually launched, startForeground() is invoked immediately by
+        // startNanobotProcessIfNeeded().
+        ownerService.startService(i);
     }
 
     public static void ensureNanobotAutostart(android.content.Context context) {
         Intent i = new Intent(context, ClawRuntimeControlService.class);
         i.setAction(ACTION_ENSURE_AUTOSTART);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(i);
-        } else {
-            context.startService(i);
-        }
+        // Same rationale as overload above.
+        context.startService(i);
     }
 
     private boolean isAllowedCaller(Intent intent) {
@@ -245,21 +270,53 @@ public class ClawRuntimeControlService extends Service {
 
     private void handleEnsureAutostart(Intent intent) throws Exception {
         JSONObject out = new JSONObject();
-        out.put("rootfsReady", isRootfsReady());
-        out.put("configExists", new File(GUEST_NANOBOT_CONFIG_PATH).exists());
+        boolean rootfsReady = isRootfsReady();
+        File configFile = new File(GUEST_NANOBOT_CONFIG_PATH);
+        boolean configExists = configFile.exists();
+        out.put("rootfsReady", rootfsReady);
+        out.put("configExists", configExists);
 
-        if (!isRootfsReady()) {
+        if (!rootfsReady) {
             out.put("started", false);
+            out.put("status", "waitingForRootfs");
             out.put("reason", "rootfs not ready");
-        } else if (!new File(GUEST_NANOBOT_CONFIG_PATH).exists()) {
-            out.put("started", false);
-            out.put("reason", "nanobot config missing");
+        } else if (!configExists) {
+            out.put("onboardAttempted", true);
+            try {
+                String onboardOutput = runNanobotOnboard();
+                out.put("onboardSucceeded", true);
+                out.put("onboardOutputTail", trimForJson(onboardOutput, 1200));
+            } catch (Exception e) {
+                out.put("onboardSucceeded", false);
+                out.put("onboardError", e.getMessage() != null ? e.getMessage() : "nanobot onboard failed");
+            }
+
+            boolean configCreated = configFile.exists();
+            out.put("configExistsAfterOnboard", configCreated);
+            if (!configCreated) {
+                out.put("started", false);
+                out.put("status", "waitingForConfig");
+                out.put("reason", "nanobot config still missing after onboard attempt");
+            } else {
+                JSONObject status = startNanobotProcessIfNeeded();
+                out.put("started", true);
+                out.put("status", "running");
+                out.put("nanobot", status);
+            }
         } else {
             JSONObject status = startNanobotProcessIfNeeded();
             out.put("started", true);
+            out.put("status", "running");
             out.put("nanobot", status);
         }
         sendSuccessResult(intent, ACTION_ENSURE_AUTOSTART, out);
+    }
+
+    private String runNanobotOnboard() throws Exception {
+        String script =
+            "set -eu\n" +
+            "exec proot-distro login " + ROOTFS_ALIAS + " -- bash -lc 'source /opt/venv/bin/activate && nanobot onboard'\n";
+        return runTermuxShellCommand(script, true);
     }
 
     private JSONObject startNanobotProcessIfNeeded() throws Exception {
@@ -550,6 +607,12 @@ public class ClawRuntimeControlService extends Service {
 
     private String nowIso() {
         return new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US).format(new Date());
+    }
+
+    private String trimForJson(String raw, int maxChars) {
+        if (raw == null) return "";
+        if (raw.length() <= maxChars) return raw;
+        return raw.substring(raw.length() - maxChars);
     }
 
     private void sendSuccessResult(Intent requestIntent, String action, JSONObject json) {
