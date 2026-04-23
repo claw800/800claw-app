@@ -221,6 +221,9 @@
                 <action android:name="dev.claw800.runtime.CONFIG_WRITE" />
                 <action android:name="dev.claw800.runtime.LOG_TAIL" />
                 <action android:name="dev.claw800.runtime.ENSURE_AUTOSTART" />
+                <action android:name="dev.claw800.runtime.BACKUP_CREATE" />
+                <action android:name="dev.claw800.runtime.BACKUP_LIST" />
+                <action android:name="dev.claw800.runtime.BACKUP_RESTORE" />
             </intent-filter>
         </service>
 

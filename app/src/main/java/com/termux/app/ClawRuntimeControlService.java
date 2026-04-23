@@ -60,11 +60,15 @@ public class ClawRuntimeControlService extends Service {
     public static final String ACTION_CONFIG_WRITE = "dev.claw800.runtime.CONFIG_WRITE";
     public static final String ACTION_LOG_TAIL = "dev.claw800.runtime.LOG_TAIL";
     public static final String ACTION_ENSURE_AUTOSTART = "dev.claw800.runtime.ENSURE_AUTOSTART";
+    public static final String ACTION_BACKUP_CREATE = "dev.claw800.runtime.BACKUP_CREATE";
+    public static final String ACTION_BACKUP_LIST = "dev.claw800.runtime.BACKUP_LIST";
+    public static final String ACTION_BACKUP_RESTORE = "dev.claw800.runtime.BACKUP_RESTORE";
 
     public static final String EXTRA_CALLER_PACKAGE = "dev.claw800.runtime.extra.CALLER_PACKAGE";
     public static final String EXTRA_RESULT_MESSENGER = "dev.claw800.runtime.extra.RESULT_MESSENGER";
     public static final String EXTRA_CONFIG_JSON = "dev.claw800.runtime.extra.CONFIG_JSON";
     public static final String EXTRA_LOG_LINES = "dev.claw800.runtime.extra.LOG_LINES";
+    public static final String EXTRA_BACKUP_FILENAME = "dev.claw800.runtime.extra.BACKUP_FILENAME";
 
     public static final String RESULT_OK = "ok";
     public static final String RESULT_ERROR = "error";
@@ -78,10 +82,16 @@ public class ClawRuntimeControlService extends Service {
         TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/lib/claw800/rootfs-installed.stamp";
     private static final String GUEST_NANOBOT_CONFIG_PATH =
         ROOTFS_INSTALL_DIR_PATH + "/root/.nanobot/config.json";
+    private static final String GUEST_NANOBOT_DIR =
+        ROOTFS_INSTALL_DIR_PATH + "/root/.nanobot";
     private static final String NANOBOT_LOG_PATH =
         TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/log/claw800-nanobot-gateway.log";
     private static final String NANOBOT_PID_PATH =
         TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/run/claw800-nanobot-gateway.pid";
+
+    // Shared external storage for backups (Option B — survives both APK uninstalls).
+    private static final String BACKUP_DIR_PATH =
+        "/storage/emulated/0/Documents/800claw/backups";
 
     private static final String NOTIFICATION_CHANNEL_ID = "claw800_runtime_control_channel";
     private static final String NOTIFICATION_CHANNEL_NAME = "claw800 runtime";
@@ -166,6 +176,12 @@ public class ClawRuntimeControlService extends Service {
                 handleConfigWrite(intent);
             } else if (ACTION_LOG_TAIL.equals(action)) {
                 handleLogTail(intent);
+            } else if (ACTION_BACKUP_CREATE.equals(action)) {
+                handleBackupCreate(intent);
+            } else if (ACTION_BACKUP_LIST.equals(action)) {
+                handleBackupList(intent);
+            } else if (ACTION_BACKUP_RESTORE.equals(action)) {
+                handleBackupRestore(intent);
             } else {
                 sendFailureResult(intent, action, "Unsupported action: " + action);
             }
@@ -327,6 +343,112 @@ public class ClawRuntimeControlService extends Service {
             "set -eu\n" +
             "exec proot-distro login " + ROOTFS_ALIAS + " -- bash -lc 'source /opt/venv/bin/activate && nanobot onboard'\n";
         return runTermuxShellCommand(script, true);
+    }
+
+    // --- Backup / Restore ---
+
+    private void handleBackupCreate(Intent intent) throws Exception {
+        if (!isRootfsReady()) {
+            throw new IllegalStateException("Cannot create backup: rootfs is not ready.");
+        }
+
+        File backupDir = new File(BACKUP_DIR_PATH);
+        if (!backupDir.exists() && !backupDir.mkdirs()) {
+            throw new IllegalStateException("Cannot create backup directory: " + BACKUP_DIR_PATH);
+        }
+
+        String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
+        String filename = "nanobot-backup-" + timestamp + ".tar.gz";
+        File archiveFile = new File(backupDir, filename);
+
+        // tar.gz the /root/.nanobot dir from inside the rootfs.
+        // We run tar from the rootfs root so paths inside the archive are relative (./root/.nanobot/...).
+        String script =
+            "set -eu\n" +
+            "tar czf '" + archiveFile.getAbsolutePath() + "' " +
+            "  -C '" + ROOTFS_INSTALL_DIR_PATH + "' " +
+            "  './root/.nanobot'\n";
+        String output = runTermuxShellCommand(script, true);
+
+        JSONObject out = new JSONObject();
+        out.put("filename", filename);
+        out.put("path", archiveFile.getAbsolutePath());
+        out.put("sizeBytes", archiveFile.length());
+        out.put("createdAt", nowIso());
+        out.put("outputTail", trimForJson(output, 500));
+        sendSuccessResult(intent, ACTION_BACKUP_CREATE, out);
+    }
+
+    private void handleBackupList(Intent intent) throws Exception {
+        File backupDir = new File(BACKUP_DIR_PATH);
+        JSONArray list = new JSONArray();
+
+        if (backupDir.exists() && backupDir.isDirectory()) {
+            File[] files = backupDir.listFiles();
+            if (files != null) {
+                // Sort by name descending so newest appears first.
+                Arrays.sort(files, (a, b) -> b.getName().compareTo(a.getName()));
+                for (File f : files) {
+                    if (f.isFile() && f.getName().startsWith("nanobot-backup-") && f.getName().endsWith(".tar.gz")) {
+                        JSONObject entry = new JSONObject();
+                        entry.put("filename", f.getName());
+                        entry.put("path", f.getAbsolutePath());
+                        entry.put("sizeBytes", f.length());
+                        entry.put("lastModified", f.lastModified());
+                        list.put(entry);
+                    }
+                }
+            }
+        }
+
+        JSONObject out = new JSONObject();
+        out.put("dir", BACKUP_DIR_PATH);
+        out.put("count", list.length());
+        out.put("backups", list);
+        sendSuccessResult(intent, ACTION_BACKUP_LIST, out);
+    }
+
+    private void handleBackupRestore(Intent intent) throws Exception {
+        String filename = intent.getStringExtra(EXTRA_BACKUP_FILENAME);
+        if (filename == null || filename.isEmpty()) {
+            throw new IllegalArgumentException("Missing " + EXTRA_BACKUP_FILENAME);
+        }
+
+        File archiveFile = new File(BACKUP_DIR_PATH, filename);
+        if (!archiveFile.exists()) {
+            throw new IllegalArgumentException("Backup file not found: " + archiveFile.getAbsolutePath());
+        }
+
+        if (!isRootfsReady()) {
+            throw new IllegalStateException("Cannot restore backup: rootfs is not ready.");
+        }
+
+        // Step 1: clear the existing /root/.nanobot in the rootfs.
+        String clearScript =
+            "set -eu\n" +
+            "rm -rf '" + GUEST_NANOBOT_DIR + "'\n" +
+            "mkdir -p '" + GUEST_NANOBOT_DIR + "'\n";
+        runTermuxShellCommand(clearScript, true);
+
+        // Step 2: extract backup archive into the rootfs.
+        // The archive contains ./root/.nanobot/... so we extract into ROOTFS_INSTALL_DIR_PATH.
+        String restoreScript =
+            "set -eu\n" +
+            "tar xzf '" + archiveFile.getAbsolutePath() + "' " +
+            "  -C '" + ROOTFS_INSTALL_DIR_PATH + "' " +
+            "  './root/.nanobot'\n";
+        String output = runTermuxShellCommand(restoreScript, true);
+
+        // Verify config survived.
+        File configFile = new File(GUEST_NANOBOT_CONFIG_PATH);
+        boolean configRestored = configFile.exists();
+
+        JSONObject out = new JSONObject();
+        out.put("filename", filename);
+        out.put("restoredAt", nowIso());
+        out.put("configRestored", configRestored);
+        out.put("outputTail", trimForJson(output, 500));
+        sendSuccessResult(intent, ACTION_BACKUP_RESTORE, out);
     }
 
     private JSONObject startNanobotProcessIfNeeded() throws Exception {
