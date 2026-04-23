@@ -6,6 +6,7 @@ import android.app.Service;
 import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -350,6 +351,16 @@ public class ClawRuntimeControlService extends Service {
     private void handleBackupCreate(Intent intent) throws Exception {
         if (!isRootfsReady()) {
             throw new IllegalStateException("Cannot create backup: rootfs is not ready.");
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!android.os.Environment.isExternalStorageManager()) {
+                throw new IllegalStateException(
+                    "Cannot create backup: All files access not granted. " +
+                    "Go to Settings → Apps → Termux → Special app access → " +
+                    "All files access → enable it."
+                );
+            }
         }
 
         File backupDir = new File(BACKUP_DIR_PATH);
