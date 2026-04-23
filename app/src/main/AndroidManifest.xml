@@ -224,6 +224,8 @@
                 <action android:name="dev.claw800.runtime.BACKUP_CREATE" />
                 <action android:name="dev.claw800.runtime.BACKUP_LIST" />
                 <action android:name="dev.claw800.runtime.BACKUP_RESTORE" />
+                <action android:name="dev.claw800.runtime.BACKUP_ESTIMATE" />
+                <action android:name="dev.claw800.runtime.BACKUP_PERMISSION_STATUS" />
             </intent-filter>
         </service>
 

@@ -64,6 +64,8 @@ public class ClawRuntimeControlService extends Service {
     public static final String ACTION_BACKUP_CREATE = "dev.claw800.runtime.BACKUP_CREATE";
     public static final String ACTION_BACKUP_LIST = "dev.claw800.runtime.BACKUP_LIST";
     public static final String ACTION_BACKUP_RESTORE = "dev.claw800.runtime.BACKUP_RESTORE";
+    public static final String ACTION_BACKUP_ESTIMATE = "dev.claw800.runtime.BACKUP_ESTIMATE";
+    public static final String ACTION_BACKUP_PERMISSION_STATUS = "dev.claw800.runtime.BACKUP_PERMISSION_STATUS";
 
     public static final String EXTRA_CALLER_PACKAGE = "dev.claw800.runtime.extra.CALLER_PACKAGE";
     public static final String EXTRA_RESULT_MESSENGER = "dev.claw800.runtime.extra.RESULT_MESSENGER";
@@ -122,9 +124,21 @@ public class ClawRuntimeControlService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null) return START_NOT_STICKY;
+        if (intent == null) {
+            // Defensive path: if caller used startForegroundService() but system
+            // redelivers a null intent (or malformed call path), still promote
+            // once to satisfy Android's foreground-service start contract.
+            startForegroundIfNeeded();
+            return maybeStopSelf();
+        }
         String action = intent.getAction();
-        if (action == null || action.isEmpty()) return START_NOT_STICKY;
+        if (action == null || action.isEmpty()) {
+            // Same defensive handling for empty action. This prevents
+            // ForegroundServiceDidNotStartInTimeException on intermittent
+            // malformed/empty action starts.
+            startForegroundIfNeeded();
+            return maybeStopSelf();
+        }
 
         if (!ACTION_ENSURE_AUTOSTART.equals(action)) {
             // External calls can happen while caller app transitions
@@ -183,6 +197,10 @@ public class ClawRuntimeControlService extends Service {
                 handleBackupList(intent);
             } else if (ACTION_BACKUP_RESTORE.equals(action)) {
                 handleBackupRestore(intent);
+            } else if (ACTION_BACKUP_ESTIMATE.equals(action)) {
+                handleBackupEstimate(intent);
+            } else if (ACTION_BACKUP_PERMISSION_STATUS.equals(action)) {
+                handleBackupPermissionStatus(intent);
             } else {
                 sendFailureResult(intent, action, "Unsupported action: " + action);
             }
@@ -368,8 +386,9 @@ public class ClawRuntimeControlService extends Service {
             throw new IllegalStateException("Cannot create backup directory: " + BACKUP_DIR_PATH);
         }
 
-        String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
-        String filename = "nanobot-backup-" + timestamp + ".tar.gz";
+        String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(new Date());
+        String nonce = String.valueOf(System.nanoTime());
+        String filename = "nanobot-backup-" + timestamp + "-" + nonce.substring(Math.max(0, nonce.length() - 6)) + ".tar.gz";
         File archiveFile = new File(backupDir, filename);
 
         // tar.gz the /root/.nanobot dir from inside the rootfs.
@@ -390,7 +409,69 @@ public class ClawRuntimeControlService extends Service {
         sendSuccessResult(intent, ACTION_BACKUP_CREATE, out);
     }
 
+    private void handleBackupEstimate(Intent intent) throws Exception {
+        if (!isRootfsReady()) {
+            throw new IllegalStateException("Cannot estimate backup: rootfs is not ready.");
+        }
+
+        File sourceDir = new File(GUEST_NANOBOT_DIR);
+        long sourceBytes = calculateDirectorySize(sourceDir);
+        long estimatedBackupBytes = estimateCompressedBackupBytes(sourceBytes);
+
+        boolean allFilesAccessGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.R
+            || Environment.isExternalStorageManager();
+
+        long freeStorageBytes = -1L;
+        if (allFilesAccessGranted) {
+            File backupDir = new File(BACKUP_DIR_PATH);
+            if (!backupDir.exists()) {
+                File parent = backupDir.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    parent.mkdirs();
+                }
+            }
+            // getUsableSpace works for both existing and non-existing leaf paths.
+            freeStorageBytes = backupDir.getUsableSpace();
+        }
+
+        JSONObject out = new JSONObject();
+        out.put("sourcePath", GUEST_NANOBOT_DIR);
+        out.put("sourceBytes", sourceBytes);
+        out.put("estimatedBackupBytes", estimatedBackupBytes);
+        out.put("backupDir", BACKUP_DIR_PATH);
+        out.put("freeStorageBytes", freeStorageBytes);
+        out.put("allFilesAccessGranted", allFilesAccessGranted);
+        out.put(
+            "hasEnoughSpace",
+            freeStorageBytes >= 0 && freeStorageBytes >= estimatedBackupBytes
+        );
+        sendSuccessResult(intent, ACTION_BACKUP_ESTIMATE, out);
+    }
+
+    private void handleBackupPermissionStatus(Intent intent) throws Exception {
+        boolean allFilesAccessGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.R
+            || Environment.isExternalStorageManager();
+        File backupDir = new File(BACKUP_DIR_PATH);
+
+        JSONObject out = new JSONObject();
+        out.put("allFilesAccessGranted", allFilesAccessGranted);
+        out.put("backupDir", BACKUP_DIR_PATH);
+        out.put("backupDirExists", backupDir.exists());
+        out.put("freeStorageBytes", allFilesAccessGranted ? backupDir.getUsableSpace() : -1L);
+        sendSuccessResult(intent, ACTION_BACKUP_PERMISSION_STATUS, out);
+    }
+
     private void handleBackupList(Intent intent) throws Exception {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                throw new IllegalStateException(
+                    "Cannot list backups: All files access not granted. " +
+                    "Go to Settings -> Apps -> Termux -> Special app access -> " +
+                    "All files access -> enable it."
+                );
+            }
+        }
+
         File backupDir = new File(BACKUP_DIR_PATH);
         JSONArray list = new JSONArray();
 
@@ -420,6 +501,16 @@ public class ClawRuntimeControlService extends Service {
     }
 
     private void handleBackupRestore(Intent intent) throws Exception {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                throw new IllegalStateException(
+                    "Cannot restore backup: All files access not granted. " +
+                    "Go to Settings -> Apps -> Termux -> Special app access -> " +
+                    "All files access -> enable it."
+                );
+            }
+        }
+
         String filename = intent.getStringExtra(EXTRA_BACKUP_FILENAME);
         if (filename == null || filename.isEmpty()) {
             throw new IllegalArgumentException("Missing " + EXTRA_BACKUP_FILENAME);
@@ -725,6 +816,26 @@ public class ClawRuntimeControlService extends Service {
             throw new IllegalStateException("Shell command failed (" + exit + "): " + command + "\n" + output);
         }
         return output.toString();
+    }
+
+    private long calculateDirectorySize(File root) {
+        if (root == null || !root.exists()) return 0L;
+        if (root.isFile()) return root.length();
+        long total = 0L;
+        File[] children = root.listFiles();
+        if (children == null) return 0L;
+        for (File child : children) {
+            total += calculateDirectorySize(child);
+        }
+        return total;
+    }
+
+    private long estimateCompressedBackupBytes(long sourceBytes) {
+        if (sourceBytes <= 0) return 0L;
+        // Conservative estimate for tar.gz in mixed text/json/log workloads.
+        long estimated = (sourceBytes * 70L) / 100L;
+        // Keep a small minimum envelope so tiny configs still show realistic non-zero.
+        return Math.max(estimated, 16 * 1024L);
     }
 
     private boolean isRootfsReady() {
