@@ -39,6 +39,7 @@ import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Control-plane service for claw800 runtime operations exposed to the RN UI.
@@ -166,6 +167,37 @@ public class ClawRuntimeControlService extends Service {
                     }
                 }
             }, "claw800-ensure-autostart").start();
+            return START_NOT_STICKY;
+        }
+
+        if (ACTION_NANOBOT_START.equals(action) || ACTION_NANOBOT_STOP.equals(action) || ACTION_NANOBOT_RESTART.equals(action)) {
+            if (!isAllowedCaller(intent)) {
+                sendFailureResult(intent, action, "Caller package is not in allowlist.");
+                return maybeStopSelf();
+            }
+
+            final Intent requestIntent = intent;
+            final String requestAction = action;
+            // Keep start/stop/restart off the main thread to avoid service execution timeouts.
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        if (ACTION_NANOBOT_START.equals(requestAction)) {
+                            handleNanobotStart(requestIntent);
+                        } else if (ACTION_NANOBOT_STOP.equals(requestAction)) {
+                            handleNanobotStop(requestIntent);
+                        } else {
+                            handleNanobotRestart(requestIntent);
+                        }
+                    } catch (Exception e) {
+                        Logger.logStackTraceWithMessage(LOG_TAG, "runtime control action failed: " + requestAction, e);
+                        sendFailureResult(requestIntent, requestAction, e.getMessage() != null ? e.getMessage() : "Unknown error");
+                    } finally {
+                        if (!isNanobotRunning()) stopSelf();
+                    }
+                }
+            }, "claw800-nanobot-control").start();
             return START_NOT_STICKY;
         }
 
@@ -650,18 +682,26 @@ public class ClawRuntimeControlService extends Service {
             synchronized (STATE_LOCK) {
                 sNanobotProcess = null;
             }
-            stopForegroundIfIdle();
-            FileUtils.deleteFile("nanobot pid file", NANOBOT_PID_PATH, true);
+            // Service may have restarted and lost in-memory process handle while
+            // nanobot is still running. Use pidfile as fallback stop source.
+            stopNanobotByPidFileIfPresent();
             return;
         }
 
         processToStop.destroy();
         try {
-            processToStop.waitFor();
+            boolean exited = processToStop.waitFor(5, TimeUnit.SECONDS);
+            if (!exited && processToStop.isAlive()) {
+                processToStop.destroyForcibly();
+                processToStop.waitFor(3, TimeUnit.SECONDS);
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             processToStop.destroyForcibly();
         }
+
+        // If handle-based termination still leaves gateway alive, use pidfile fallback.
+        stopNanobotByPidFileIfPresent();
 
         synchronized (STATE_LOCK) {
             if (sNanobotProcess == processToStop) {
@@ -672,6 +712,42 @@ public class ClawRuntimeControlService extends Service {
         }
 
         FileUtils.deleteFile("nanobot pid file", NANOBOT_PID_PATH, true);
+        stopForegroundIfIdle();
+    }
+
+    private void stopNanobotByPidFileIfPresent() throws Exception {
+        File pidFile = new File(NANOBOT_PID_PATH);
+        if (!pidFile.exists()) {
+            stopForegroundIfIdle();
+            return;
+        }
+
+        String pidRaw = readFile(pidFile).trim();
+        if (pidRaw.isEmpty()) {
+            FileUtils.deleteFile("nanobot pid file", NANOBOT_PID_PATH, true);
+            stopForegroundIfIdle();
+            return;
+        }
+
+        // Prefer graceful TERM first, then force KILL if needed.
+        String script =
+            "set -eu\n" +
+            "PID='" + pidRaw + "'\n" +
+            "if kill -0 \"$PID\" 2>/dev/null; then\n" +
+            "  kill \"$PID\" 2>/dev/null || true\n" +
+            "  sleep 1\n" +
+            "fi\n" +
+            "if kill -0 \"$PID\" 2>/dev/null; then\n" +
+            "  kill -9 \"$PID\" 2>/dev/null || true\n" +
+            "fi\n";
+        runTermuxShellCommand(script, false);
+
+        FileUtils.deleteFile("nanobot pid file", NANOBOT_PID_PATH, true);
+        synchronized (STATE_LOCK) {
+            sNanobotProcess = null;
+            sNanobotLastExitAtMs = System.currentTimeMillis();
+            sNanobotLastExitCode = 0;
+        }
         stopForegroundIfIdle();
     }
 
