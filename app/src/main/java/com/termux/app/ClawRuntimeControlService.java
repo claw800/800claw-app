@@ -420,7 +420,7 @@ public class ClawRuntimeControlService extends Service {
 
         String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(new Date());
         String nonce = String.valueOf(System.nanoTime());
-        String filename = "nanobot-backup-" + timestamp + "-" + nonce.substring(Math.max(0, nonce.length() - 6)) + ".tar.gz";
+        String filename = "800claw-backup-" + timestamp + "-" + nonce.substring(Math.max(0, nonce.length() - 6)) + ".tar.gz";
         File archiveFile = new File(backupDir, filename);
 
         // tar.gz the /root/.nanobot dir from inside the rootfs.
@@ -513,7 +513,10 @@ public class ClawRuntimeControlService extends Service {
                 // Sort by name descending so newest appears first.
                 Arrays.sort(files, (a, b) -> b.getName().compareTo(a.getName()));
                 for (File f : files) {
-                    if (f.isFile() && f.getName().startsWith("nanobot-backup-") && f.getName().endsWith(".tar.gz")) {
+                    // Keep legacy "nanobot-backup-" compatibility so existing backups stay visible.
+                    String name = f.getName();
+                    boolean isKnownBackupPrefix = name.startsWith("800claw-backup-") || name.startsWith("nanobot-backup-");
+                    if (f.isFile() && isKnownBackupPrefix && name.endsWith(".tar.gz")) {
                         JSONObject entry = new JSONObject();
                         entry.put("filename", f.getName());
                         entry.put("path", f.getAbsolutePath());
