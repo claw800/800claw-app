@@ -30,6 +30,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
+import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
@@ -61,6 +62,9 @@ public class ClawRuntimeControlService extends Service {
     public static final String ACTION_CONFIG_READ = "dev.claw800.runtime.CONFIG_READ";
     public static final String ACTION_CONFIG_WRITE = "dev.claw800.runtime.CONFIG_WRITE";
     public static final String ACTION_LOG_TAIL = "dev.claw800.runtime.LOG_TAIL";
+    public static final String ACTION_LOG_STREAM_START = "dev.claw800.runtime.LOG_STREAM_START";
+    public static final String ACTION_LOG_STREAM_STOP = "dev.claw800.runtime.LOG_STREAM_STOP";
+    public static final String ACTION_LOG_STREAM_EVENT = "dev.claw800.runtime.LOG_STREAM_EVENT";
     public static final String ACTION_ENSURE_AUTOSTART = "dev.claw800.runtime.ENSURE_AUTOSTART";
     public static final String ACTION_BACKUP_CREATE = "dev.claw800.runtime.BACKUP_CREATE";
     public static final String ACTION_BACKUP_LIST = "dev.claw800.runtime.BACKUP_LIST";
@@ -103,6 +107,8 @@ public class ClawRuntimeControlService extends Service {
 
     private static final int DEFAULT_TAIL_LINES = 200;
     private static final int MAX_TAIL_LINES = 2000;
+    private static final int LOG_STREAM_POLL_INTERVAL_MS = 300;
+    private static final int LOG_STREAM_MAX_CHUNK_BYTES = 64 * 1024;
 
     private static final Object STATE_LOCK = new Object();
     private static Process sNanobotProcess;
@@ -110,6 +116,7 @@ public class ClawRuntimeControlService extends Service {
     private static int sNanobotLastExitCode = Integer.MIN_VALUE;
     private static long sNanobotLastExitAtMs = 0L;
     private static String sNanobotLastError = "";
+    private static Thread sLogStreamThread;
 
     private static final Set<String> ALLOWED_CALLER_PACKAGES = new HashSet<>(
         Arrays.asList("com.claw800.ui", "com.claw800.runtime", "com.claw800.app", "dev.claw800.ui", "dev.claw800.runtime", "dev.claw800.app")
@@ -223,6 +230,10 @@ public class ClawRuntimeControlService extends Service {
                 handleConfigWrite(intent);
             } else if (ACTION_LOG_TAIL.equals(action)) {
                 handleLogTail(intent);
+            } else if (ACTION_LOG_STREAM_START.equals(action)) {
+                handleLogStreamStart(intent);
+            } else if (ACTION_LOG_STREAM_STOP.equals(action)) {
+                handleLogStreamStop(intent);
             } else if (ACTION_BACKUP_CREATE.equals(action)) {
                 handleBackupCreate(intent);
             } else if (ACTION_BACKUP_LIST.equals(action)) {
@@ -343,6 +354,110 @@ public class ClawRuntimeControlService extends Service {
         out.put("path", NANOBOT_LOG_PATH);
         out.put("lines", new JSONArray(readTailLines(new File(NANOBOT_LOG_PATH), tailLines)));
         sendSuccessResult(intent, ACTION_LOG_TAIL, out);
+    }
+
+    private void handleLogStreamStart(final Intent intent) throws Exception {
+        final File logFile = new File(NANOBOT_LOG_PATH);
+        final File parent = logFile.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            throw new IllegalStateException("Cannot create nanobot log directory: " + parent.getAbsolutePath());
+        }
+        if (!logFile.exists() && !logFile.createNewFile()) {
+            throw new IllegalStateException("Cannot create nanobot log file: " + NANOBOT_LOG_PATH);
+        }
+
+        stopLogStreamWorkerLocked();
+
+        final Intent streamIntent = new Intent(intent);
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                runLogStreamWorker(streamIntent, logFile);
+            }
+        }, "claw800-log-stream");
+
+        synchronized (STATE_LOCK) {
+            sLogStreamThread = worker;
+        }
+        worker.start();
+
+        JSONObject out = new JSONObject();
+        out.put("streaming", true);
+        out.put("path", NANOBOT_LOG_PATH);
+        out.put("startedAt", nowIso());
+        sendSuccessResult(intent, ACTION_LOG_STREAM_START, out);
+    }
+
+    private void handleLogStreamStop(Intent intent) throws Exception {
+        stopLogStreamWorkerLocked();
+        JSONObject out = new JSONObject();
+        out.put("streaming", false);
+        out.put("stoppedAt", nowIso());
+        sendSuccessResult(intent, ACTION_LOG_STREAM_STOP, out);
+    }
+
+    private void runLogStreamWorker(Intent streamIntent, File logFile) {
+        long cursor = Math.max(0L, logFile.length());
+        while (true) {
+            Thread current = Thread.currentThread();
+            synchronized (STATE_LOCK) {
+                if (sLogStreamThread != current) break;
+            }
+            if (current.isInterrupted()) break;
+            try {
+                long fileLen = logFile.length();
+                if (fileLen < cursor) {
+                    cursor = 0L;
+                }
+                if (fileLen > cursor) {
+                    long remaining = fileLen - cursor;
+                    int toRead = (int) Math.min(remaining, LOG_STREAM_MAX_CHUNK_BYTES);
+                    byte[] bytes = new byte[toRead];
+                    try (RandomAccessFile raf = new RandomAccessFile(logFile, "r")) {
+                        raf.seek(cursor);
+                        raf.readFully(bytes);
+                    }
+                    cursor += toRead;
+                    String chunk = new String(bytes, StandardCharsets.UTF_8);
+                    if (!chunk.isEmpty()) {
+                        JSONObject payload = new JSONObject();
+                        payload.put("path", NANOBOT_LOG_PATH);
+                        payload.put("chunk", chunk);
+                        payload.put("appendedAt", nowIso());
+                        sendStreamEvent(streamIntent, payload);
+                    }
+                }
+                Thread.sleep(LOG_STREAM_POLL_INTERVAL_MS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                Logger.logStackTraceWithMessage(LOG_TAG, "log stream worker failed", e);
+                try {
+                    JSONObject payload = new JSONObject();
+                    payload.put("path", NANOBOT_LOG_PATH);
+                    payload.put("error", e.getMessage() == null ? "log stream worker failed" : e.getMessage());
+                    payload.put("appendedAt", nowIso());
+                    sendStreamEvent(streamIntent, payload);
+                } catch (Exception ignore) {
+                    // Ignore secondary stream event failure.
+                }
+                try {
+                    Thread.sleep(1000L);
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+    }
+
+    private void sendStreamEvent(Intent requestIntent, JSONObject payload) {
+        Bundle bundle = new Bundle();
+        bundle.putBoolean(RESULT_OK, true);
+        bundle.putString(RESULT_ACTION, ACTION_LOG_STREAM_EVENT);
+        bundle.putString(RESULT_JSON, payload.toString());
+        sendResultBundle(requestIntent, 2, bundle);
     }
 
     private void handleEnsureAutostart(Intent intent) throws Exception {
@@ -983,7 +1098,7 @@ public class ClawRuntimeControlService extends Service {
     }
 
     private int maybeStopSelf() {
-        if (!isNanobotRunning()) {
+        if (!isNanobotRunning() && !isLogStreamActive()) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 stopForeground(true);
             }
@@ -999,9 +1114,32 @@ public class ClawRuntimeControlService extends Service {
     }
 
     private void stopForegroundIfIdle() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isNanobotRunning()) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isNanobotRunning() && !isLogStreamActive()) {
             stopForeground(true);
             stopSelf();
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        stopLogStreamWorkerLocked();
+        super.onDestroy();
+    }
+
+    private boolean isLogStreamActive() {
+        synchronized (STATE_LOCK) {
+            return sLogStreamThread != null && sLogStreamThread.isAlive();
+        }
+    }
+
+    private void stopLogStreamWorkerLocked() {
+        Thread threadToStop;
+        synchronized (STATE_LOCK) {
+            threadToStop = sLogStreamThread;
+            sLogStreamThread = null;
+        }
+        if (threadToStop != null) {
+            threadToStop.interrupt();
         }
     }
 
