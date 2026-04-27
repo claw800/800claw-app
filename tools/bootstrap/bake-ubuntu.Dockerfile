@@ -19,6 +19,8 @@ ENV HOME=/root
 ENV NANOBOT_DATA_DIR=/root/.nanobot
 ENV NANOBOT_WORKSPACE=/root/.nanobot/workspace
 ENV PYTHON_VERSION=3.12
+ENV LANG=zh_CN.UTF-8
+ENV LC_ALL=zh_CN.UTF-8
 
 # 1) Create non-root runtime user (kept for parity with the validated template).
 RUN useradd -m -s /bin/bash claws
@@ -30,12 +32,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     python3.12 python3.12-venv python3-pip \
     curl wget git jq zip unzip tar xz-utils \
     ffmpeg imagemagick poppler-utils \
+    wkhtmltopdf pandoc \
     httpie netcat-openbsd dnsutils \
     vim htop tree ripgrep fd-find bat \
     ca-certificates gnupg \
     libpango-1.0-0 libharfbuzz0b libffi-dev \
+    libcairo2 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 \
+    fontconfig fonts-noto-cjk fonts-wqy-microhei locales \
     tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng \
     build-essential \
+    # WeasyPrint/reportlab runtime dependencies.
+    libxml2 libxslt1.1 libjpeg-turbo8 zlib1g \
+    && sed -i 's/^# *\(zh_CN.UTF-8 UTF-8\)/\1/' /etc/locale.gen \
+    && sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen \
+    && locale-gen zh_CN.UTF-8 en_US.UTF-8 \
+    && update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
 
 # 3) Node.js 22.x via NodeSource.
@@ -60,6 +71,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install "pdf2docx==${PDF2DOCX_VERSION}"
 
 RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
+    python-docx \
+    reportlab \
+    fpdf2 \
+    pdfkit \
+    pypandoc \
+    weasyprint
+
+RUN --mount=type=cache,target=/root/.cache/pip \
     pip install "markitdown[all]==${MARKITDOWN_VERSION}" && \
     markitdown --help >/dev/null
 
@@ -68,6 +88,46 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 RUN npm install -g "@steipete/summarize@${SUMMARIZE_VERSION}" && \
     summarize --version >/dev/null
+
+# 6) Post-bake smoke tests (fail fast in CI if CJK/PDF stack is broken).
+RUN set -eux; \
+    # Core binaries must exist.
+    command -v wkhtmltopdf >/dev/null; \
+    command -v pandoc >/dev/null; \
+    command -v fc-list >/dev/null; \
+    # CJK font discovery sanity check.
+    fc-list :lang=zh | head -5; \
+    test "$(fc-list :lang=zh | wc -l)" -gt 0; \
+    # Python import/runtime sanity check for document generation toolchain.
+    python3 - <<'PYEOF'
+import os
+from fpdf import FPDF
+from reportlab.pdfgen import canvas
+import weasyprint
+import pypandoc
+import pdfkit
+import docx
+
+# fpdf smoke
+pdf = FPDF()
+pdf.add_page()
+pdf.set_font("helvetica", size=12)
+pdf.cell(0, 10, "claw800 smoke test", ln=True)
+pdf.output("/tmp/smoke-fpdf.pdf")
+
+# reportlab smoke
+c = canvas.Canvas("/tmp/smoke-reportlab.pdf")
+c.drawString(72, 720, "claw800 smoke test")
+c.save()
+
+# weasyprint smoke (minimal html -> pdf)
+weasyprint.HTML(string="<html><body><p>claw800 smoke test</p></body></html>").write_pdf("/tmp/smoke-weasyprint.pdf")
+
+for path in ("/tmp/smoke-fpdf.pdf", "/tmp/smoke-reportlab.pdf", "/tmp/smoke-weasyprint.pdf"):
+    if not os.path.exists(path) or os.path.getsize(path) <= 0:
+        raise RuntimeError(f"Smoke PDF not generated: {path}")
+PYEOF
+RUN rm -f /tmp/smoke-fpdf.pdf /tmp/smoke-reportlab.pdf /tmp/smoke-weasyprint.pdf
 
 # 6) Browser stack is intentionally optional in Phase 2.
 #    Enable with --build-arg ENABLE_BROWSER_STACK=1 when validating browser-use later.

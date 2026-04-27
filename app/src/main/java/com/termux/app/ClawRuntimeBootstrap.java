@@ -77,10 +77,14 @@ final class ClawRuntimeBootstrap {
             try {
                 ensureRootfsEnterScript();
                 ensureAllowExternalAppsEnabled();
+                disableNodeSourceAptRepo();
+                switchAptMirrorsToAliyun();
+                writeGuestResolvConf();
+                writeGuestTimezoneDefault();
             } catch (Exception e) {
                 // Do not block app startup for existing installs; user can still proceed.
                 Logger.logStackTraceWithMessage(LOG_TAG, "Failed to refresh claw800-enter script", e);
-                logToFile("warning: failed to refresh claw800-enter script / allow-external-apps policy: " + e.getMessage());
+                logToFile("warning: failed to refresh rootfs runtime hygiene policies: " + e.getMessage());
             }
             whenDone.run();
             return;
@@ -450,12 +454,19 @@ final class ClawRuntimeBootstrap {
     }
 
     /**
-     * Swaps {@code archive.ubuntu.com} and {@code security.ubuntu.com} to
-     * Aliyun's Ubuntu mirror inside {@code /etc/apt/sources.list.d/ubuntu.sources}.
+     * Swaps {@code archive.ubuntu.com}, {@code security.ubuntu.com}, and
+     * {@code ports.ubuntu.com} to CN-friendly mirrors inside
+     * {@code /etc/apt/sources.list.d/ubuntu.sources}.
      * Users in CN see a large {@code apt-get update} speed-up; users
      * elsewhere can still reach Aliyun at respectable speeds, or edit the
      * file themselves. The original file is preserved as {@code .bak}.
      * Idempotent.
+     *
+     * <p>Important: ARM64 rootfs entries usually come from
+     * {@code ports.ubuntu.com/ubuntu-ports}. Some mirrors (including Aliyun)
+     * may be incomplete for arm64 universe/multiverse indexes, causing 404
+     * warnings. We therefore rewrite ports to TUNA's ubuntu-ports endpoint for
+     * better package coverage on arm64.
      */
     private static void switchAptMirrorsToAliyun() throws Exception {
         logToFile("switching guest Ubuntu apt mirrors to Aliyun");
@@ -470,6 +481,7 @@ final class ClawRuntimeBootstrap {
             "  sed -Ei \\\n" +
             "    -e 's|https?://archive\\.ubuntu\\.com/ubuntu/?|https://mirrors.aliyun.com/ubuntu/|g' \\\n" +
             "    -e 's|https?://security\\.ubuntu\\.com/ubuntu/?|https://mirrors.aliyun.com/ubuntu/|g' \\\n" +
+            "    -e 's|https?://ports\\.ubuntu\\.com/ubuntu-ports/?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/|g' \\\n" +
             "    \"$src\"\n" +
             "fi\n";
 
