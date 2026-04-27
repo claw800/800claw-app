@@ -114,6 +114,7 @@ final class ClawRuntimeBootstrap {
                 disableNodeSourceAptRepo();
                 switchAptMirrorsToAliyun();
                 writeGuestResolvConf();
+                writeGuestTimezoneDefault();
                 registerAndroidAids();
                 writeProotDistroPlugin();
                 writeSentinel();
@@ -502,6 +503,27 @@ final class ClawRuntimeBootstrap {
             "nameserver 8.8.8.8\n" +
             "RESOLV\n" +
             "chmod 644 \"$ROOT/etc/resolv.conf\"\n";
+
+        runShell(script);
+    }
+
+    /**
+     * Sets guest timezone to Asia/Shanghai by default (UTC+8).
+     * This runs during the same first-launch hygiene stage as apt/dns updates.
+     */
+    private static void writeGuestTimezoneDefault() throws Exception {
+        logToFile("setting guest timezone default to Asia/Shanghai");
+
+        String script =
+            "set -eu\n" +
+            "ROOT='" + ROOTFS_INSTALL_DIR_PATH + "'\n" +
+            "ZONE='Asia/Shanghai'\n" +
+            "ZONEINFO=\"$ROOT/usr/share/zoneinfo/$ZONE\"\n" +
+            "if [ -f \"$ZONEINFO\" ]; then\n" +
+            "  printf '%s\\n' \"$ZONE\" > \"$ROOT/etc/timezone\"\n" +
+            "  rm -f \"$ROOT/etc/localtime\"\n" +
+            "  ln -s \"/usr/share/zoneinfo/$ZONE\" \"$ROOT/etc/localtime\"\n" +
+            "fi\n";
 
         runShell(script);
     }

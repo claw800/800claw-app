@@ -36,6 +36,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
@@ -911,6 +912,15 @@ public class ClawRuntimeControlService extends Service {
         int lastErrorIndex = -1;
         String lastErrorLine = "";
         boolean connectedMarkerSeen = false;
+        int feishuReconnectCount = 0;
+        int feishuDnsResolveErrorCount = 0;
+        int feishuPingTimeoutCount = 0;
+        int feishuNoCloseFrameCount = 0;
+        int feishuKeepaliveTimeoutCount = 0;
+        String feishuLastDisconnectReason = "";
+        boolean feishuDuplicateMessageDetected = false;
+        String feishuDuplicateMessageSample = "";
+        HashMap<String, Integer> feishuRecentMessageSeen = new HashMap<>();
         JSONArray logTail = new JSONArray();
 
         int idx = 0;
@@ -925,6 +935,36 @@ public class ClawRuntimeControlService extends Service {
                 lastErrorLine = line;
             }
             if (line.contains("connected to wss://msg-frontier.feishu.cn/ws/v2")) connectedMarkerSeen = true;
+            if (line.contains("trying to reconnect for the")) feishuReconnectCount++;
+            if (line.contains("Failed to resolve 'open.feishu.cn'")) feishuDnsResolveErrorCount++;
+            if (line.contains("ping_timeout")) {
+                feishuPingTimeoutCount++;
+                feishuLastDisconnectReason = "ping_timeout";
+            }
+            if (line.contains("no close frame received or sent")) {
+                feishuNoCloseFrameCount++;
+                feishuLastDisconnectReason = "no_close_frame";
+            }
+            if (line.contains("keepalive ping timeout")) {
+                feishuKeepaliveTimeoutCount++;
+                feishuLastDisconnectReason = "keepalive_ping_timeout";
+            }
+            if (line.contains("Processing message from feishu:")) {
+                int messageBodyStart = line.lastIndexOf(": ");
+                if (messageBodyStart > 0 && messageBodyStart + 2 < line.length()) {
+                    String body = line.substring(messageBodyStart + 2).trim();
+                    if (!body.isEmpty()) {
+                        int count = feishuRecentMessageSeen.containsKey(body) ? feishuRecentMessageSeen.get(body) + 1 : 1;
+                        feishuRecentMessageSeen.put(body, count);
+                        if (count > 1) {
+                            feishuDuplicateMessageDetected = true;
+                            if (feishuDuplicateMessageSample.isEmpty()) {
+                                feishuDuplicateMessageSample = body;
+                            }
+                        }
+                    }
+                }
+            }
             idx++;
         }
 
@@ -947,6 +987,19 @@ public class ClawRuntimeControlService extends Service {
             healthReason = "running but no heartbeat/info log observed yet";
         }
 
+        String feishuHealth;
+        if (!running) {
+            feishuHealth = "stopped";
+        } else if (feishuDnsResolveErrorCount > 0) {
+            feishuHealth = "dns_error";
+        } else if (feishuPingTimeoutCount > 0 || feishuNoCloseFrameCount > 0 || feishuKeepaliveTimeoutCount > 0) {
+            feishuHealth = "degraded";
+        } else if (connectedMarkerSeen) {
+            feishuHealth = "connected";
+        } else {
+            feishuHealth = "starting";
+        }
+
         out.put("running", running);
         out.put("startedAtMs", startedAtMs);
         out.put("pidFilePath", NANOBOT_PID_PATH);
@@ -955,6 +1008,18 @@ public class ClawRuntimeControlService extends Service {
         out.put("healthReason", healthReason);
         out.put("heartbeatSeen", hasHeartbeat);
         out.put("feishuConnectedMarkerSeen", connectedMarkerSeen);
+        out.put("feishuHealth", feishuHealth);
+        out.put("feishuReconnectCountRecent", feishuReconnectCount);
+        out.put("feishuLastDisconnectReason", feishuLastDisconnectReason);
+        out.put("feishuDnsResolveErrorCountRecent", feishuDnsResolveErrorCount);
+        out.put("feishuPingTimeoutCountRecent", feishuPingTimeoutCount);
+        out.put("feishuNoCloseFrameCountRecent", feishuNoCloseFrameCount);
+        out.put("feishuKeepaliveTimeoutCountRecent", feishuKeepaliveTimeoutCount);
+        out.put("feishuDuplicateMessageDetected", feishuDuplicateMessageDetected);
+        out.put(
+            "feishuDuplicateMessageSample",
+            feishuDuplicateMessageSample.isEmpty() ? JSONObject.NULL : feishuDuplicateMessageSample
+        );
         out.put("lastError", lastErrorLine);
         out.put("lastExitCode", lastExitCode == Integer.MIN_VALUE ? JSONObject.NULL : lastExitCode);
         out.put("lastExitAtMs", lastExitAtMs == 0L ? JSONObject.NULL : lastExitAtMs);
