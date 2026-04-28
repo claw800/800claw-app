@@ -38,7 +38,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ca-certificates gnupg \
     libpango-1.0-0 libharfbuzz0b libffi-dev \
     libcairo2 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 \
-    fontconfig fonts-noto-cjk fonts-wqy-microhei locales \
+    fontconfig fonts-noto-cjk fonts-noto-color-emoji fonts-wqy-microhei locales \
     tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng \
     build-essential \
     # WeasyPrint/reportlab runtime dependencies.
@@ -87,7 +87,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install "nanobot-ai==${NANOBOT_AI_VERSION}"
 
 RUN npm install -g "@steipete/summarize@${SUMMARIZE_VERSION}" && \
-    summarize --version >/dev/null
+    summarize --version >/dev/null && \
+    npm cache clean --force && \
+    rm -rf /root/.npm
 
 # 6) Post-bake smoke tests (fail fast in CI if CJK/PDF stack is broken).
 RUN set -eux; \
@@ -140,7 +142,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       npm install -g playwright && \
       npx playwright install-deps && \
       npx playwright install chromium && \
-      pip install "browser-use==${BROWSER_USE_VERSION}"; \
+      pip install "browser-use==${BROWSER_USE_VERSION}" && \
+      npm cache clean --force && \
+      rm -rf /root/.npm; \
     fi
 
 # 7) Permissions and manifests.

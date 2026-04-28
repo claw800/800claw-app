@@ -81,6 +81,8 @@ final class ClawRuntimeBootstrap {
                 switchAptMirrorsToAliyun();
                 writeGuestResolvConf();
                 writeGuestTimezoneDefault();
+                writeGuestNpmRegistryMirror();
+                writeGuestPipMirror();
             } catch (Exception e) {
                 // Do not block app startup for existing installs; user can still proceed.
                 Logger.logStackTraceWithMessage(LOG_TAG, "Failed to refresh claw800-enter script", e);
@@ -119,6 +121,8 @@ final class ClawRuntimeBootstrap {
                 switchAptMirrorsToAliyun();
                 writeGuestResolvConf();
                 writeGuestTimezoneDefault();
+                writeGuestNpmRegistryMirror();
+                writeGuestPipMirror();
                 registerAndroidAids();
                 writeProotDistroPlugin();
                 writeSentinel();
@@ -536,6 +540,63 @@ final class ClawRuntimeBootstrap {
             "  rm -f \"$ROOT/etc/localtime\"\n" +
             "  ln -s \"/usr/share/zoneinfo/$ZONE\" \"$ROOT/etc/localtime\"\n" +
             "fi\n";
+
+        runShell(script);
+    }
+
+    /**
+     * Sets guest npm registry mirror for CN-friendly package install speed.
+     *
+     * <p>Writes {@code /root/.npmrc} as:
+     * {@code registry=https://registry.npmmirror.com/}
+     * Idempotent and safe to re-run on every startup hygiene pass.
+     */
+    private static void writeGuestNpmRegistryMirror() throws Exception {
+        logToFile("setting guest npm registry mirror to npmmirror");
+
+        String script =
+            "set -eu\n" +
+            "ROOT='" + ROOTFS_INSTALL_DIR_PATH + "'\n" +
+            "f=\"$ROOT/root/.npmrc\"\n" +
+            "mkdir -p \"$ROOT/root\"\n" +
+            "if [ -f \"$f\" ] && grep -q '^registry=https://registry\\.npmmirror\\.com/?$' \"$f\" 2>/dev/null; then\n" +
+            "  exit 0\n" +
+            "fi\n" +
+            "if [ -f \"$f\" ] && grep -q '^registry=' \"$f\" 2>/dev/null; then\n" +
+            "  sed -Ei 's|^registry=.*|registry=https://registry.npmmirror.com/|' \"$f\"\n" +
+            "else\n" +
+            "  printf 'registry=https://registry.npmmirror.com/\\n' >> \"$f\"\n" +
+            "fi\n";
+
+        runShell(script);
+    }
+
+    /**
+     * Sets guest pip mirror config for CN-friendly package install speed.
+     *
+     * <p>Writes {@code /root/.pip/pip.conf} as:
+     * <pre>
+     * [global]
+     * index-url = https://mirrors.aliyun.com/pypi/simple/
+     * trusted-host = mirrors.aliyun.com
+     * </pre>
+     * Idempotent and safe to re-run on every startup hygiene pass.
+     */
+    private static void writeGuestPipMirror() throws Exception {
+        logToFile("setting guest pip mirror to Aliyun");
+
+        String script =
+            "set -eu\n" +
+            "ROOT='" + ROOTFS_INSTALL_DIR_PATH + "'\n" +
+            "d=\"$ROOT/root/.pip\"\n" +
+            "f=\"$d/pip.conf\"\n" +
+            "mkdir -p \"$d\"\n" +
+            "cat > \"$f\" <<'PIPCONF'\n" +
+            "[global]\n" +
+            "index-url = https://mirrors.aliyun.com/pypi/simple/\n" +
+            "trusted-host = mirrors.aliyun.com\n" +
+            "PIPCONF\n" +
+            "chmod 644 \"$f\"\n";
 
         runShell(script);
     }
