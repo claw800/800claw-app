@@ -14,7 +14,7 @@ ARG SUMMARIZE_VERSION=0.12.0
 # 20260428 - update nanobot-ai to v0.1.5.post2
 # https://pypi.org/project/nanobot-ai/
 # ARG NANOBOT_AI_VERSION=0.1.4.post5
-ARG NANOBOT_AI_VERSION=v0.1.5.post2
+ARG NANOBOT_AI_VERSION=0.1.5.post2
 
 ARG ENABLE_BROWSER_STACK=0
 
