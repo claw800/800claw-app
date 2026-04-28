@@ -1,6 +1,6 @@
 # Phase 1 Playbook (Online Bootstrap PoC)
 
-Goal: prove that `termux-app-800claw` can run Ubuntu via `proot-distro`, install required toolchains/libraries, and launch nanobot manually.
+Goal: prove that `800claw-app` can run Ubuntu via `proot-distro`, install required toolchains/libraries, and launch nanobot manually.
 
 This phase is intentionally online/networked. Offline bundling is Phase 2.
 

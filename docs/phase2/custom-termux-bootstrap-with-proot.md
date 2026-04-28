@@ -83,7 +83,7 @@ Two options to switch over:
 
 1. **Release-asset swap (preferred for reproducible CI builds)**
    - Upload the custom zips as assets on a release in our fork
-     (`claw800/termux-app-800claw`).
+     (`claw800/800claw-app`).
    - Change the URL template in `app/build.gradle`'s `downloadBootstrap`
      block (or override it) to point at our release.
    - Update the pinned SHA256s to the values from `SHA256SUMS.txt`.

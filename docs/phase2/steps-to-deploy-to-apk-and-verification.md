@@ -4,7 +4,7 @@ This runbook starts after Ubuntu rootfs artifacts are rebuilt and copied to `too
 
 ## 1) Verify rootfs artifacts before staging
 
-From repo root (`termux-app-800claw`):
+From repo root (`800claw-app`):
 
 ```powershell
 .\tools\bootstrap\verify_rootfs_artifacts.ps1 -ExtractArtifacts

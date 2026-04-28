@@ -1,6 +1,6 @@
 # Steps To Upgrade Fork To Upstream `v0.119.0-beta.3`
 
-This document captures the exact workflow used to upgrade `claw800/termux-app-800claw` from upstream `v0.118.0` to `v0.119.0-beta.3`, while preserving claw800-specific deltas.
+This document captures the exact workflow used to upgrade `claw800/800claw-app` from upstream `v0.118.0` to `v0.119.0-beta.3`, while preserving claw800-specific deltas.
 
 It is written as a reusable runbook for future upstream upgrades.
 
@@ -11,7 +11,7 @@ It is written as a reusable runbook for future upstream upgrades.
 Run all commands from repo root:
 
 ```powershell
-cd D:\dev\cd\claw_dev\termux-app-800claw
+cd D:\dev\cd\claw_dev\800claw-app
 git checkout master
 git status
 ```

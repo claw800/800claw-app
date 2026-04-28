@@ -1,7 +1,7 @@
 # claw800 Runtime Migration Plan
 
 Status: **DRAFT v1** — phased, PoC-first.
-Target repo: `claw800/termux-app-800claw` (this fork).
+Target repo: `claw800/800claw-app` (this fork).
 Companion repo: `claw800/800claw` (existing React Native UI, will be slimmed).
 Last reviewed: 2026-04-08.
 
@@ -66,7 +66,7 @@ D:\dev\cd\claw_dev\
 │   ├── mobile\                 # React Native source
 │   ├── android\                # Android shell for RN UI only (stripped of proot/rootfs work)
 │   └── docs\
-└── termux-app-800claw\         # Runtime APK (this fork)
+└── 800claw-app\                # Runtime APK (this fork)
     ├── app\                    # Android app module (Termux core)
     ├── termux-shared\          # Shared Kotlin/Java lib
     ├── terminal-emulator\
