@@ -726,7 +726,12 @@ public class ClawRuntimeControlService extends Service {
             throw new IllegalStateException("Cannot create nanobot log directory: " + logParent.getAbsolutePath());
         }
 
-        // Add a clear restart boundary for operators reading tails in RN.
+        // Start each gateway run with a fresh log file at the same fixed path.
+        try (FileOutputStream ignored = new FileOutputStream(logFile, false)) {
+            // Opening with append=false truncates existing content (or creates the file).
+        }
+
+        // Add a clear start boundary for operators reading tails in RN.
         try (FileOutputStream fos = new FileOutputStream(logFile, true)) {
             String marker = "\n=== " + nowIso() + " claw800 runtime starting nanobot gateway ===\n";
             fos.write(marker.getBytes(StandardCharsets.UTF_8));
