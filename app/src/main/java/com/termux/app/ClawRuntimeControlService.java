@@ -121,7 +121,7 @@ public class ClawRuntimeControlService extends Service {
     private static final int MAX_TAIL_LINES = 2000;
     private static final int LOG_STREAM_POLL_INTERVAL_MS = 300;
     private static final int LOG_STREAM_MAX_CHUNK_BYTES = 64 * 1024;
-    private static final boolean DEFAULT_ENABLE_PARTIAL_WAKE_LOCK = true;
+    private static final boolean DEFAULT_ENABLE_PARTIAL_WAKE_LOCK = false;
     private static final boolean DEFAULT_ENABLE_WIFI_LOCK = false;
 
     private static final Object STATE_LOCK = new Object();
