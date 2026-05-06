@@ -25,6 +25,8 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -217,6 +219,8 @@
                 <action android:name="dev.claw800.runtime.NANOBOT_RESTART" />
                 <action android:name="dev.claw800.runtime.NANOBOT_STATUS" />
                 <action android:name="dev.claw800.runtime.RUNTIME_STATUS" />
+                <action android:name="dev.claw800.runtime.RUNTIME_POLICY_GET" />
+                <action android:name="dev.claw800.runtime.RUNTIME_POLICY_SET" />
                 <action android:name="dev.claw800.runtime.CONFIG_READ" />
                 <action android:name="dev.claw800.runtime.CONFIG_WRITE" />
                 <action android:name="dev.claw800.runtime.LOG_TAIL" />

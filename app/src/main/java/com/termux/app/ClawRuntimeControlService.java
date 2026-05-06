@@ -1,9 +1,12 @@
 package com.termux.app;
 
+import android.annotation.SuppressLint;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
@@ -13,11 +16,13 @@ import android.os.Looper;
 import android.os.Message;
 import android.os.Messenger;
 import android.os.RemoteException;
+import android.os.PowerManager;
 
 import androidx.annotation.Nullable;
 
 import com.termux.R;
 import com.termux.shared.file.FileUtils;
+import com.termux.shared.android.PermissionUtils;
 import com.termux.shared.logger.Logger;
 import com.termux.shared.notification.NotificationUtils;
 import com.termux.shared.termux.TermuxConstants;
@@ -60,6 +65,8 @@ public class ClawRuntimeControlService extends Service {
     public static final String ACTION_NANOBOT_RESTART = "dev.claw800.runtime.NANOBOT_RESTART";
     public static final String ACTION_NANOBOT_STATUS = "dev.claw800.runtime.NANOBOT_STATUS";
     public static final String ACTION_RUNTIME_STATUS = "dev.claw800.runtime.RUNTIME_STATUS";
+    public static final String ACTION_RUNTIME_POLICY_GET = "dev.claw800.runtime.RUNTIME_POLICY_GET";
+    public static final String ACTION_RUNTIME_POLICY_SET = "dev.claw800.runtime.RUNTIME_POLICY_SET";
     public static final String ACTION_CONFIG_READ = "dev.claw800.runtime.CONFIG_READ";
     public static final String ACTION_CONFIG_WRITE = "dev.claw800.runtime.CONFIG_WRITE";
     public static final String ACTION_LOG_TAIL = "dev.claw800.runtime.LOG_TAIL";
@@ -78,6 +85,8 @@ public class ClawRuntimeControlService extends Service {
     public static final String EXTRA_CONFIG_JSON = "dev.claw800.runtime.extra.CONFIG_JSON";
     public static final String EXTRA_LOG_LINES = "dev.claw800.runtime.extra.LOG_LINES";
     public static final String EXTRA_BACKUP_FILENAME = "dev.claw800.runtime.extra.BACKUP_FILENAME";
+    public static final String EXTRA_WAKE_LOCK_ENABLED = "dev.claw800.runtime.extra.WAKE_LOCK_ENABLED";
+    public static final String EXTRA_WIFI_LOCK_ENABLED = "dev.claw800.runtime.extra.WIFI_LOCK_ENABLED";
 
     public static final String RESULT_OK = "ok";
     public static final String RESULT_ERROR = "error";
@@ -97,6 +106,8 @@ public class ClawRuntimeControlService extends Service {
         TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/log/claw800-nanobot-gateway.log";
     private static final String NANOBOT_PID_PATH =
         TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/run/claw800-nanobot-gateway.pid";
+    private static final String RUNTIME_POLICY_PATH =
+        TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/lib/claw800/runtime-policy.json";
 
     // Shared external storage for backups (Option B — survives both APK uninstalls).
     private static final String BACKUP_DIR_PATH =
@@ -110,6 +121,8 @@ public class ClawRuntimeControlService extends Service {
     private static final int MAX_TAIL_LINES = 2000;
     private static final int LOG_STREAM_POLL_INTERVAL_MS = 300;
     private static final int LOG_STREAM_MAX_CHUNK_BYTES = 64 * 1024;
+    private static final boolean DEFAULT_ENABLE_PARTIAL_WAKE_LOCK = true;
+    private static final boolean DEFAULT_ENABLE_WIFI_LOCK = false;
 
     private static final Object STATE_LOCK = new Object();
     private static Process sNanobotProcess;
@@ -118,6 +131,8 @@ public class ClawRuntimeControlService extends Service {
     private static long sNanobotLastExitAtMs = 0L;
     private static String sNanobotLastError = "";
     private static Thread sLogStreamThread;
+    private static PowerManager.WakeLock sNanobotWakeLock;
+    private static WifiManager.WifiLock sNanobotWifiLock;
 
     private static final Set<String> ALLOWED_CALLER_PACKAGES = new HashSet<>(
         Arrays.asList("com.claw800.ui", "com.claw800.runtime", "com.claw800.app", "dev.claw800.ui", "dev.claw800.runtime", "dev.claw800.app")
@@ -225,6 +240,10 @@ public class ClawRuntimeControlService extends Service {
                 handleNanobotStatus(intent);
             } else if (ACTION_RUNTIME_STATUS.equals(action)) {
                 handleRuntimeStatus(intent);
+            } else if (ACTION_RUNTIME_POLICY_GET.equals(action)) {
+                handleRuntimePolicyGet(intent);
+            } else if (ACTION_RUNTIME_POLICY_SET.equals(action)) {
+                handleRuntimePolicySet(intent);
             } else if (ACTION_CONFIG_READ.equals(action)) {
                 handleConfigRead(intent);
             } else if (ACTION_CONFIG_WRITE.equals(action)) {
@@ -321,8 +340,38 @@ public class ClawRuntimeControlService extends Service {
         out.put("rootfsInstallDir", ROOTFS_INSTALL_DIR_PATH);
         out.put("nanobotConfigPath", GUEST_NANOBOT_CONFIG_PATH);
         out.put("nanobotConfigExists", new File(GUEST_NANOBOT_CONFIG_PATH).exists());
+        out.put("runtimePolicy", buildRuntimePolicyJson(resolveRuntimePowerPolicy()));
         out.put("nanobot", buildNanobotStatusJson(DEFAULT_TAIL_LINES));
         sendSuccessResult(intent, ACTION_RUNTIME_STATUS, out);
+    }
+
+    private void handleRuntimePolicyGet(Intent intent) throws Exception {
+        JSONObject out = buildRuntimePolicyJson(resolveRuntimePowerPolicy());
+        out.put("path", RUNTIME_POLICY_PATH);
+        sendSuccessResult(intent, ACTION_RUNTIME_POLICY_GET, out);
+    }
+
+    private void handleRuntimePolicySet(Intent intent) throws Exception {
+        boolean hasWakeLockEnabled = intent.hasExtra(EXTRA_WAKE_LOCK_ENABLED);
+        boolean hasWifiLockEnabled = intent.hasExtra(EXTRA_WIFI_LOCK_ENABLED);
+        if (!hasWakeLockEnabled && !hasWifiLockEnabled) {
+            throw new IllegalArgumentException(
+                "Missing runtime policy values. Provide EXTRA_WAKE_LOCK_ENABLED and/or EXTRA_WIFI_LOCK_ENABLED."
+            );
+        }
+
+        RuntimePowerPolicy current = resolveRuntimePowerPolicy();
+        RuntimePowerPolicy updated = new RuntimePowerPolicy(
+            hasWakeLockEnabled ? intent.getBooleanExtra(EXTRA_WAKE_LOCK_ENABLED, current.wakeLockEnabled) : current.wakeLockEnabled,
+            hasWifiLockEnabled ? intent.getBooleanExtra(EXTRA_WIFI_LOCK_ENABLED, current.wifiLockEnabled) : current.wifiLockEnabled
+        );
+        writeRuntimePowerPolicy(updated);
+        applyRuntimePowerPolicyIfRunning(updated);
+
+        JSONObject out = buildRuntimePolicyJson(updated);
+        out.put("path", RUNTIME_POLICY_PATH);
+        out.put("updatedAt", nowIso());
+        sendSuccessResult(intent, ACTION_RUNTIME_POLICY_SET, out);
     }
 
     private void handleConfigRead(Intent intent) throws Exception {
@@ -761,9 +810,198 @@ public class ClawRuntimeControlService extends Service {
             sNanobotLastError = "";
         }
 
+        RuntimePowerPolicy runtimePolicy = resolveRuntimePowerPolicy();
+        acquireNanobotWakeAndWifiLock(runtimePolicy);
         startForegroundIfNeeded();
         watchNanobotExit(started);
         return buildNanobotStatusJson(DEFAULT_TAIL_LINES);
+    }
+
+    @SuppressLint({"WakelockTimeout", "BatteryLife"})
+    private void acquireNanobotWakeAndWifiLock(RuntimePowerPolicy policy) {
+        if (policy.wakeLockEnabled) {
+            ensureWakeLockHeld();
+        } else {
+            releaseNanobotWakeLockIfHeld();
+        }
+
+        if (policy.wifiLockEnabled) {
+            ensureWifiLockHeld();
+        } else {
+            releaseNanobotWifiLockIfHeld();
+        }
+
+        // Request ignoring battery optimizations where possible (OEM-dependent).
+        // This is already declared in the manifest; we don't fail if the user declines.
+        try {
+            if (policy.wakeLockEnabled && !PermissionUtils.checkIfBatteryOptimizationsDisabled(this)) {
+                PermissionUtils.requestDisableBatteryOptimizations(this);
+            }
+        } catch (Exception e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed to request disabling battery optimizations", e);
+        }
+    }
+
+    @SuppressLint("WakelockTimeout")
+    private void ensureWakeLockHeld() {
+        synchronized (STATE_LOCK) {
+            if (sNanobotWakeLock != null && sNanobotWakeLock.isHeld()) return;
+        }
+
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (pm == null) return;
+        PowerManager.WakeLock wakeLock = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            TermuxConstants.TERMUX_APP_NAME.toLowerCase() + ":claw800-nanobot-wakelock"
+        );
+        try {
+            wakeLock.acquire();
+            synchronized (STATE_LOCK) {
+                sNanobotWakeLock = wakeLock;
+            }
+        } catch (RuntimeException e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed to acquire PARTIAL_WAKE_LOCK", e);
+        }
+    }
+
+    private void ensureWifiLockHeld() {
+        synchronized (STATE_LOCK) {
+            if (sNanobotWifiLock != null && sNanobotWifiLock.isHeld()) return;
+        }
+
+        try {
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                WifiManager.WifiLock wifiLock = wm.createWifiLock(
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                    TermuxConstants.TERMUX_APP_NAME.toLowerCase() + ":claw800-nanobot-wifilock"
+                );
+                wifiLock.acquire();
+                synchronized (STATE_LOCK) {
+                    sNanobotWifiLock = wifiLock;
+                }
+            }
+        } catch (SecurityException se) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed to acquire Wi-Fi lock (missing permission?)", se);
+        } catch (RuntimeException e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed to acquire Wi-Fi lock", e);
+        }
+    }
+
+    private void applyRuntimePowerPolicyIfRunning(RuntimePowerPolicy policy) {
+        if (!isNanobotRunning()) return;
+        acquireNanobotWakeAndWifiLock(policy);
+    }
+
+    private void releaseNanobotWakeAndWifiLockIfHeld() {
+        PowerManager.WakeLock wakeLockToRelease;
+        WifiManager.WifiLock wifiLockToRelease;
+        synchronized (STATE_LOCK) {
+            wakeLockToRelease = sNanobotWakeLock;
+            wifiLockToRelease = sNanobotWifiLock;
+            sNanobotWakeLock = null;
+            sNanobotWifiLock = null;
+        }
+
+        if (wakeLockToRelease != null) {
+            try {
+                if (wakeLockToRelease.isHeld()) wakeLockToRelease.release();
+            } catch (RuntimeException ignored) {
+                // Best-effort cleanup only.
+            }
+        }
+        if (wifiLockToRelease != null) {
+            try {
+                if (wifiLockToRelease.isHeld()) wifiLockToRelease.release();
+            } catch (RuntimeException ignored) {
+                // Best-effort cleanup only.
+            }
+        }
+    }
+
+    private void releaseNanobotWakeLockIfHeld() {
+        PowerManager.WakeLock wakeLockToRelease;
+        synchronized (STATE_LOCK) {
+            wakeLockToRelease = sNanobotWakeLock;
+            sNanobotWakeLock = null;
+        }
+        if (wakeLockToRelease != null) {
+            try {
+                if (wakeLockToRelease.isHeld()) wakeLockToRelease.release();
+            } catch (RuntimeException ignored) {
+                // Best-effort cleanup only.
+            }
+        }
+    }
+
+    private void releaseNanobotWifiLockIfHeld() {
+        WifiManager.WifiLock wifiLockToRelease;
+        synchronized (STATE_LOCK) {
+            wifiLockToRelease = sNanobotWifiLock;
+            sNanobotWifiLock = null;
+        }
+        if (wifiLockToRelease != null) {
+            try {
+                if (wifiLockToRelease.isHeld()) wifiLockToRelease.release();
+            } catch (RuntimeException ignored) {
+                // Best-effort cleanup only.
+            }
+        }
+    }
+
+    private RuntimePowerPolicy resolveRuntimePowerPolicy() {
+        File policyFile = new File(RUNTIME_POLICY_PATH);
+        if (!policyFile.exists()) {
+            return new RuntimePowerPolicy(DEFAULT_ENABLE_PARTIAL_WAKE_LOCK, DEFAULT_ENABLE_WIFI_LOCK);
+        }
+
+        try {
+            String raw = readFile(policyFile);
+            if (raw == null || raw.trim().isEmpty()) {
+                return new RuntimePowerPolicy(DEFAULT_ENABLE_PARTIAL_WAKE_LOCK, DEFAULT_ENABLE_WIFI_LOCK);
+            }
+            JSONObject parsed = new JSONObject(raw);
+            boolean wakeLockEnabled = parsed.optBoolean("wakeLockEnabled", DEFAULT_ENABLE_PARTIAL_WAKE_LOCK);
+            boolean wifiLockEnabled = parsed.optBoolean("wifiLockEnabled", DEFAULT_ENABLE_WIFI_LOCK);
+            return new RuntimePowerPolicy(wakeLockEnabled, wifiLockEnabled);
+        } catch (Exception e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed to parse runtime policy; falling back to defaults", e);
+            return new RuntimePowerPolicy(DEFAULT_ENABLE_PARTIAL_WAKE_LOCK, DEFAULT_ENABLE_WIFI_LOCK);
+        }
+    }
+
+    private void writeRuntimePowerPolicy(RuntimePowerPolicy policy) throws Exception {
+        File policyFile = new File(RUNTIME_POLICY_PATH);
+        File parent = policyFile.getParentFile();
+        if (parent == null) {
+            throw new IllegalStateException("Runtime policy parent directory is null.");
+        }
+        if (!parent.exists() && !parent.mkdirs()) {
+            throw new IllegalStateException("Failed to create runtime policy directory: " + parent.getAbsolutePath());
+        }
+
+        JSONObject out = buildRuntimePolicyJson(policy);
+        try (FileOutputStream fos = new FileOutputStream(policyFile, false)) {
+            fos.write(out.toString().getBytes(StandardCharsets.UTF_8));
+            fos.getFD().sync();
+        }
+    }
+
+    private JSONObject buildRuntimePolicyJson(RuntimePowerPolicy policy) throws Exception {
+        JSONObject out = new JSONObject();
+        out.put("wakeLockEnabled", policy.wakeLockEnabled);
+        out.put("wifiLockEnabled", policy.wifiLockEnabled);
+        return out;
+    }
+
+    private static final class RuntimePowerPolicy {
+        final boolean wakeLockEnabled;
+        final boolean wifiLockEnabled;
+
+        RuntimePowerPolicy(boolean wakeLockEnabled, boolean wifiLockEnabled) {
+            this.wakeLockEnabled = wakeLockEnabled;
+            this.wifiLockEnabled = wifiLockEnabled;
+        }
     }
 
     private void watchNanobotExit(final Process observedProcess) {
@@ -784,6 +1022,9 @@ public class ClawRuntimeControlService extends Service {
                         sNanobotLastExitAtMs = System.currentTimeMillis();
                     }
                 }
+
+                // Stop holding wake/Wi-Fi locks as soon as we observe nanobot exit.
+                releaseNanobotWakeAndWifiLockIfHeld();
 
                 FileUtils.deleteFile("nanobot pid file", NANOBOT_PID_PATH, true);
                 mMainHandler.post(new Runnable() {
@@ -836,12 +1077,14 @@ public class ClawRuntimeControlService extends Service {
         }
 
         FileUtils.deleteFile("nanobot pid file", NANOBOT_PID_PATH, true);
+        releaseNanobotWakeAndWifiLockIfHeld();
         stopForegroundIfIdle();
     }
 
     private void stopNanobotByPidFileIfPresent() throws Exception {
         File pidFile = new File(NANOBOT_PID_PATH);
         if (!pidFile.exists()) {
+            releaseNanobotWakeAndWifiLockIfHeld();
             stopForegroundIfIdle();
             return;
         }
@@ -849,6 +1092,7 @@ public class ClawRuntimeControlService extends Service {
         String pidRaw = readFile(pidFile).trim();
         if (pidRaw.isEmpty()) {
             FileUtils.deleteFile("nanobot pid file", NANOBOT_PID_PATH, true);
+            releaseNanobotWakeAndWifiLockIfHeld();
             stopForegroundIfIdle();
             return;
         }
@@ -872,6 +1116,7 @@ public class ClawRuntimeControlService extends Service {
             sNanobotLastExitAtMs = System.currentTimeMillis();
             sNanobotLastExitCode = 0;
         }
+        releaseNanobotWakeAndWifiLockIfHeld();
         stopForegroundIfIdle();
     }
 
@@ -1193,6 +1438,7 @@ public class ClawRuntimeControlService extends Service {
     @Override
     public void onDestroy() {
         stopLogStreamWorkerLocked();
+        releaseNanobotWakeAndWifiLockIfHeld();
         super.onDestroy();
     }
 
