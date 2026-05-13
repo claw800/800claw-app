@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PACKAGE_VARIANT: apt-android-7
+      RELEASE_TAG_NAME: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -40,9 +41,21 @@ jobs:
           ./gradlew assembleDebug --no-daemon
           test -f "$APK_DIR_PATH/${APK_BASENAME_PREFIX}_universal.apk"
           echo "APK_PATH=$APK_DIR_PATH/${APK_BASENAME_PREFIX}_universal.apk" >> "$GITHUB_ENV"
+          if [[ -n "${RELEASE_TAG_NAME:-}" ]]; then
+            OSS_V_RAW="${RELEASE_TAG_NAME}"
+          else
+            OSS_V_RAW="${RELEASE_VERSION_NAME}"
+          fi
+          OSS_V=$(echo "$OSS_V_RAW" | sed 's/[^a-zA-Z0-9._+-]/_/g')
+          echo "OSS_PINNED_KEY=releases/800claw-termux-app/800claw-termux-app-${OSS_V}-universal.apk" >> "$GITHUB_ENV"
+          echo "OSS version slug: ${OSS_V} (pinned key in GITHUB_ENV)"
 
       - name: Upload to OSS
-        run: chmod +x scripts/oss-upload-apk.sh && scripts/oss-upload-apk.sh "$APK_PATH" releases/800claw-termux-app/800claw-termux-app-latest-universal.apk
+        run: |
+          set -euo pipefail
+          chmod +x scripts/oss-upload-apk.sh
+          scripts/oss-upload-apk.sh "$APK_PATH" "$OSS_PINNED_KEY"
+          scripts/oss-upload-apk.sh "$APK_PATH" releases/800claw-termux-app/800claw-termux-app-latest-universal.apk
         env:
           ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
           ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
