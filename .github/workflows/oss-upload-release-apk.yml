@@ -1,0 +1,50 @@
+name: Upload Termux APK to Aliyun OSS
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  upload-termux-universal:
+    if: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID != '' && secrets.ALIYUN_OSS_ACCESS_KEY_SECRET != '' }}
+    runs-on: ubuntu-latest
+    env:
+      PACKAGE_VARIANT: apt-android-7
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install ossutil
+        run: curl -fsSL https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
+
+      - name: Build debug universal APK
+        shell: bash {0}
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          GITHUB_SHA="${GITHUB_SHA}"
+          CURRENT_VERSION_NAME_REGEX='\s+versionName "([^"]+)"$'
+          CURRENT_VERSION_NAME="$(grep -m 1 -E "$CURRENT_VERSION_NAME_REGEX" ./app/build.gradle | sed -r "s/$CURRENT_VERSION_NAME_REGEX/\1/")"
+          RELEASE_VERSION_NAME="v$CURRENT_VERSION_NAME+${GITHUB_SHA:0:7}"
+          APK_DIR_PATH="./app/build/outputs/apk/debug"
+          APK_VERSION_TAG="$RELEASE_VERSION_NAME-${PACKAGE_VARIANT}-github-debug"
+          APK_BASENAME_PREFIX="termux-app_$APK_VERSION_TAG"
+          export TERMUX_APP_VERSION_NAME="${RELEASE_VERSION_NAME/v/}"
+          export TERMUX_APK_VERSION_TAG="$APK_VERSION_TAG"
+          export TERMUX_PACKAGE_VARIANT="${PACKAGE_VARIANT}"
+          ./gradlew assembleDebug --no-daemon
+          test -f "$APK_DIR_PATH/${APK_BASENAME_PREFIX}_universal.apk"
+          echo "APK_PATH=$APK_DIR_PATH/${APK_BASENAME_PREFIX}_universal.apk" >> "$GITHUB_ENV"
+
+      - name: Upload to OSS
+        run: chmod +x scripts/oss-upload-apk.sh && scripts/oss-upload-apk.sh "$APK_PATH" releases/800claw-termux-app/800claw-termux-app-latest-universal.apk
+        env:
+          ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
