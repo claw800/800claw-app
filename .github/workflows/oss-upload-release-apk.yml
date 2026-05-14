@@ -2,6 +2,16 @@ name: Upload Termux APK to Aliyun OSS
 
 on:
   workflow_dispatch:
+    inputs:
+      oss_deploy_env:
+        description: "OSS prefix dev | uat | prod → {env}/artifacts/apks/..."
+        type: choice
+        required: false
+        default: dev
+        options:
+          - dev
+          - uat
+          - prod
   release:
     types: [published]
 
@@ -12,6 +22,7 @@ jobs:
     env:
       PACKAGE_VARIANT: apt-android-7
       RELEASE_TAG_NAME: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+      OSS_DEPLOY_ENV: ${{ github.event_name == 'release' && 'prod' || (inputs.oss_deploy_env || 'dev') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -20,8 +31,20 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Install ossutil
-        run: curl -fsSL https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
+      - name: Install ossutil 2.0
+        env:
+          OSSUTIL2_VER: "2.2.1"
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          curl -fsSL -o "$tmp/ossutil.zip" \
+            "https://gosspublic.alicdn.com/ossutil/v2/${OSSUTIL2_VER}/ossutil-${OSSUTIL2_VER}-linux-amd64.zip"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip
+          unzip -q "$tmp/ossutil.zip" -d "$tmp/extract"
+          sudo install -m 0755 "$tmp/extract/ossutil-${OSSUTIL2_VER}-linux-amd64/ossutil" /usr/local/bin/ossutil
+          rm -rf "$tmp"
+          ossutil --version
 
       - name: Build debug universal APK
         shell: bash {0}
@@ -47,7 +70,8 @@ jobs:
             OSS_V_RAW="${RELEASE_VERSION_NAME}"
           fi
           OSS_V=$(echo "$OSS_V_RAW" | sed 's/[^a-zA-Z0-9._+-]/_/g')
-          echo "OSS_PINNED_KEY=releases/800claw-termux-app/800claw-termux-app-${OSS_V}-universal.apk" >> "$GITHUB_ENV"
+          PREFIX="${OSS_DEPLOY_ENV}/artifacts/apks/800claw-termux-app"
+          echo "OSS_PINNED_KEY=${PREFIX}/800claw-termux-app-${OSS_V}-universal.apk" >> "$GITHUB_ENV"
           echo "OSS version slug: ${OSS_V} (pinned key in GITHUB_ENV)"
 
       - name: Upload to OSS
@@ -55,7 +79,7 @@ jobs:
           set -euo pipefail
           chmod +x scripts/oss-upload-apk.sh
           scripts/oss-upload-apk.sh "$APK_PATH" "$OSS_PINNED_KEY"
-          scripts/oss-upload-apk.sh "$APK_PATH" releases/800claw-termux-app/800claw-termux-app-latest-universal.apk
+          scripts/oss-upload-apk.sh "$APK_PATH" "${OSS_DEPLOY_ENV}/artifacts/apks/800claw-termux-app/800claw-termux-app-latest-universal.apk"
         env:
           ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
           ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
