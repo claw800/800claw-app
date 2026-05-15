@@ -678,15 +678,21 @@ public class ClawRuntimeControlService extends Service {
                 // Sort by name descending so newest appears first.
                 Arrays.sort(files, (a, b) -> b.getName().compareTo(a.getName()));
                 for (File f : files) {
-                    // Keep legacy "nanobot-backup-" compatibility so existing backups stay visible.
                     String name = f.getName();
                     boolean isKnownBackupPrefix = name.startsWith("800claw-backup-") || name.startsWith("nanobot-backup-");
-                    if (f.isFile() && isKnownBackupPrefix && name.endsWith(".tar.gz")) {
+                    if (f.isFile() && (name.endsWith(".tar.gz") || name.endsWith(".zip"))) {
+                        // Known-prefix archives are always included.
+                        // For unknown archives, probe for config.json to identify
+                        // external nanobot instance backups.
+                        if (!isKnownBackupPrefix && !archiveContainsConfig(f)) {
+                            continue;
+                        }
                         JSONObject entry = new JSONObject();
                         entry.put("filename", f.getName());
                         entry.put("path", f.getAbsolutePath());
                         entry.put("sizeBytes", f.length());
                         entry.put("lastModified", f.lastModified());
+                        entry.put("source", isKnownBackupPrefix ? "native" : "external");
                         list.put(entry);
                     }
                 }
@@ -732,14 +738,51 @@ public class ClawRuntimeControlService extends Service {
             "mkdir -p '" + GUEST_NANOBOT_DIR + "'\n";
         runTermuxShellCommand(clearScript, true);
 
-        // Step 2: extract backup archive into the rootfs.
-        // The archive contains ./root/.nanobot/... so we extract into ROOTFS_INSTALL_DIR_PATH.
-        String restoreScript =
-            "set -eu\n" +
-            "tar xzf '" + archiveFile.getAbsolutePath() + "' " +
-            "  -C '" + ROOTFS_INSTALL_DIR_PATH + "' " +
-            "  './root/.nanobot'\n";
-        String output = runTermuxShellCommand(restoreScript, true);
+        // Step 2: detect the internal directory structure of the archive.
+        // Native backups use "./root/.nanobot"; external backups use e.g. "clawbot-home-.../data".
+        String nanobotDir = findNanobotDirInArchive(archiveFile);
+        if (nanobotDir == null || nanobotDir.isEmpty()) {
+            throw new IllegalArgumentException(
+                "Cannot restore backup: config.json not found in archive."
+            );
+        }
+
+        // Step 3: extract and place contents into rootfs.
+        String output;
+        boolean isNativeBackup = nanobotDir.equals("./root/.nanobot") || nanobotDir.equals("root/.nanobot");
+        if (isNativeBackup) {
+            // Native backup: extract directly into rootfs (paths already align).
+            String restoreScript =
+                "set -eu\n" +
+                "tar xzf '" + archiveFile.getAbsolutePath() + "' " +
+                "  -C '" + ROOTFS_INSTALL_DIR_PATH + "' " +
+                "  '" + nanobotDir + "'\n";
+            output = runTermuxShellCommand(restoreScript, true);
+        } else {
+            // External backup: extract to temp, then copy data/ contents to rootfs.
+            String tempExtractDir = TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH + "/claw800-restore-tmp";
+            runTermuxShellCommand("rm -rf '" + tempExtractDir + "' && mkdir -p '" + tempExtractDir + "'", true);
+
+            String extractScript;
+            if (filename.endsWith(".zip")) {
+                extractScript = "unzip -o '" + archiveFile.getAbsolutePath() + "' -d '" + tempExtractDir + "'\n";
+            } else {
+                extractScript = "tar xzf '" + archiveFile.getAbsolutePath() + "' -C '" + tempExtractDir + "'\n";
+            }
+            runTermuxShellCommand(extractScript, true);
+
+            // Copy data/ folder contents into the rootfs nanobot dir.
+            String dataDir = tempExtractDir + "/" + nanobotDir + "/data";
+            String copyScript =
+                "set -eu\n" +
+                "if [ -d '" + dataDir + "' ]; then\n" +
+                "  cp -a '" + dataDir + "'/. '" + GUEST_NANOBOT_DIR + "'/\n" +
+                "fi\n";
+            output = runTermuxShellCommand(copyScript, true);
+
+            // Cleanup temp.
+            runTermuxShellCommand("rm -rf '" + tempExtractDir + "'", false);
+        }
 
         // Verify config survived.
         File configFile = new File(GUEST_NANOBOT_CONFIG_PATH);
@@ -1043,7 +1086,7 @@ public class ClawRuntimeControlService extends Service {
             processToStop = sNanobotProcess;
         }
 
-        if (processToStop == null || !processToStop.isAlive()) {
+        if (processToStop == null || !isProcessAlive(processToStop)) {
             synchronized (STATE_LOCK) {
                 sNanobotProcess = null;
             }
@@ -1056,13 +1099,13 @@ public class ClawRuntimeControlService extends Service {
         processToStop.destroy();
         try {
             boolean exited = processToStop.waitFor(5, TimeUnit.SECONDS);
-            if (!exited && processToStop.isAlive()) {
-                processToStop.destroyForcibly();
+            if (!exited && isProcessAlive(processToStop)) {
+                destroyProcessForcibly(processToStop);
                 processToStop.waitFor(3, TimeUnit.SECONDS);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            processToStop.destroyForcibly();
+            destroyProcessForcibly(processToStop);
         }
 
         // If handle-based termination still leaves gateway alive, use pidfile fallback.
@@ -1347,6 +1390,105 @@ public class ClawRuntimeControlService extends Service {
         return Math.max(estimated, 16 * 1024L);
     }
 
+    /**
+     * Check if a tar.gz or zip file contains a config.json anywhere in its tree.
+     * Used to identify external nanobot backup archives without known prefixes.
+     */
+    private boolean archiveContainsConfig(File archiveFile) {
+        String name = archiveFile.getName();
+        String script;
+        if (name.endsWith(".zip")) {
+            script = "unzip -l '" + archiveFile.getAbsolutePath() + "' | grep -m1 'config.json'";
+        } else {
+            script = "tar tzf '" + archiveFile.getAbsolutePath() + "' | grep -m1 'config.json'";
+        }
+        try {
+            String output = runTermuxShellCommand(script, false);
+            return output != null && !output.trim().isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Find the nanobot directory path inside a tar.gz or zip archive.
+     * Returns the path prefix that contains config.json, e.g.:
+     *   "./root/.nanobot"        (native backup)
+     *   "clawbot-home-.../data"  (external backup)
+     * Returns null if config.json not found.
+     */
+    private String findNanobotDirInArchive(File archiveFile) throws Exception {
+        String listing;
+        String name = archiveFile.getName();
+        if (name.endsWith(".zip")) {
+            listing = runTermuxShellCommand(
+                "unzip -l '" + archiveFile.getAbsolutePath() + "'", false);
+        } else {
+            listing = runTermuxShellCommand(
+                "tar tzf '" + archiveFile.getAbsolutePath() + "'", false);
+        }
+        if (listing == null) return null;
+
+        for (String line : listing.split("\n")) {
+            line = line.trim();
+            if (line.startsWith("---") || line.startsWith("Archive") || line.isEmpty()) continue;
+
+            // For unzip -l: filename is the last whitespace-delimited column
+            String path;
+            if (name.endsWith(".zip")) {
+                String[] parts = line.split("\\s+");
+                path = parts[parts.length - 1];
+            } else {
+                path = line;
+            }
+
+            if (path.endsWith("/config.json") || path.equals("config.json")) {
+                String dir = path;
+                if (dir.endsWith("/config.json")) {
+                    dir = dir.substring(0, dir.length() - "/config.json".length());
+                } else {
+                    dir = dir.substring(0, dir.length() - "config.json".length());
+                }
+                // Remove trailing slash
+                if (dir.endsWith("/")) dir = dir.substring(0, dir.length() - 1);
+                return dir;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Check if a Process is still alive. Uses Process.isAlive() on API 26+
+     * and exitValue() probing on pre-O because the method was added in API 26.
+     */
+    private boolean isProcessAlive(Process p) {
+        if (p == null) return false;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return p.isAlive();
+        }
+        try {
+            p.exitValue();
+            return false;
+        } catch (IllegalThreadStateException e) {
+            return true;
+        }
+    }
+
+    /**
+     * Attempt to forcibly terminate a Process. On API 26+ uses
+     * Process.destroyForcibly(); on pre-O falls back to the pidfile
+     * stop mechanism (which uses kill -9) so we just call destroy() again.
+     */
+    private void destroyProcessForcibly(Process p) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            p.destroyForcibly();
+        } else {
+            // Pre-O: no destroyForcibly(). destroy() was already called above;
+            // stopNanobotByPidFileIfPresent() below handles leftovers via kill -9.
+            p.destroy();
+        }
+    }
+
     private boolean isRootfsReady() {
         return new File(ROOTFS_SENTINEL_PATH).exists()
             && new File(ROOTFS_INSTALL_DIR_PATH, "bin").exists()
@@ -1360,7 +1502,7 @@ public class ClawRuntimeControlService extends Service {
     }
 
     private boolean isNanobotRunningLocked() {
-        return sNanobotProcess != null && sNanobotProcess.isAlive();
+        return sNanobotProcess != null && isProcessAlive(sNanobotProcess);
     }
 
     private int sanitizeTailCount(int requested) {
