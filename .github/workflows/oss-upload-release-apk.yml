@@ -12,8 +12,11 @@ on:
           - dev
           - uat
           - prod
-  release:
-    types: [published]
+  # auto-runs on every matching push during Phase 2 iteration.
+  # kept for future reference. Disabled for now to avoid expensive
+  # auto-runs on every matching push during Phase 2 iteration.
+  # release:
+  #   types: [published]
 
 jobs:
   upload-termux-universal:
