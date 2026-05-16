@@ -16,7 +16,9 @@ ARG SUMMARIZE_VERSION=0.12.0
 # ARG NANOBOT_AI_VERSION=0.1.4.post5
 # ARG NANOBOT_AI_VERSION=0.1.5.post2
 # 20260503 - update nanobot-ai to v0.1.5.post3
-ARG NANOBOT_AI_VERSION=0.1.5.post3
+# ARG NANOBOT_AI_VERSION=0.1.5.post3
+# 20260517 - update nanobot-ai to v0.2.0
+ARG NANOBOT_AI_VERSION=0.2.0
 
 ARG ENABLE_BROWSER_STACK=0
 
@@ -38,6 +40,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv python3-pip \
     curl wget git jq zip unzip tar xz-utils \
+    cron \
     ffmpeg imagemagick poppler-utils \
     wkhtmltopdf pandoc \
     httpie netcat-openbsd dnsutils \
@@ -101,6 +104,7 @@ RUN npm install -g "@steipete/summarize@${SUMMARIZE_VERSION}" && \
 # 6) Post-bake smoke tests (fail fast in CI if CJK/PDF stack is broken).
 RUN set -eux; \
     # Core binaries must exist.
+    command -v cron >/dev/null; \
     command -v wkhtmltopdf >/dev/null; \
     command -v pandoc >/dev/null; \
     command -v fc-list >/dev/null; \

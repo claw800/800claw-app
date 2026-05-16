@@ -829,11 +829,14 @@ public class ClawRuntimeControlService extends Service {
             fos.write(marker.getBytes(StandardCharsets.UTF_8));
         }
 
+        // 20260517 - start cron daemon if not running
         String script =
             "set -eu\n" +
             "mkdir -p '" + new File(NANOBOT_PID_PATH).getParent() + "'\n" +
             "printf '%s\\n' $$ > '" + NANOBOT_PID_PATH + "'\n" +
-            "exec proot-distro login " + ROOTFS_ALIAS + " -- bash -lc 'source /opt/venv/bin/activate && exec nanobot gateway'\n";
+            "exec proot-distro login " + ROOTFS_ALIAS + " -- bash -lc '" +
+            "if ! pgrep -x cron >/dev/null 2>&1; then cron; fi; " +
+            "source /opt/venv/bin/activate && exec nanobot gateway'\n";
 
         ProcessBuilder pb = new ProcessBuilder(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + "/sh", "-c", script);
         Map<String, String> env = pb.environment();
