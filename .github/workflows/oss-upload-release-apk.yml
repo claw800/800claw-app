@@ -12,15 +12,15 @@ on:
           - dev
           - uat
           - prod
-  # auto-runs on every matching push during Phase 2 iteration.
-  # kept for future reference. Disabled for now to avoid expensive
-  # auto-runs on every matching push during Phase 2 iteration.
+  # NOTE(claw800): release: published disabled for Phase 2 (was never push-triggered).
   # release:
   #   types: [published]
 
 jobs:
   upload-termux-universal:
-    if: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID != '' && secrets.ALIYUN_OSS_ACCESS_KEY_SECRET != '' }}
+    # Manual dispatch only. Do not use secrets in job-level if (invalid YAML).
+    # Push may still appear on failed validation runs until this file is valid.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       PACKAGE_VARIANT: apt-android-7
@@ -28,6 +28,14 @@ jobs:
       OSS_DEPLOY_ENV: ${{ github.event_name == 'release' && 'prod' || (inputs.oss_deploy_env || 'dev') }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Require OSS secrets
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}" ]; then
+            echo "::error::ALIYUN_OSS_ACCESS_KEY_ID / ALIYUN_OSS_ACCESS_KEY_SECRET must be set in repo secrets"
+            exit 1
+          fi
 
       - uses: actions/setup-java@v5
         with:
