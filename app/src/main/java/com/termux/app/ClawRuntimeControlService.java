@@ -77,6 +77,7 @@ public class ClawRuntimeControlService extends Service {
     public static final String ACTION_BACKUP_CREATE = "dev.claw800.runtime.BACKUP_CREATE";
     public static final String ACTION_BACKUP_LIST = "dev.claw800.runtime.BACKUP_LIST";
     public static final String ACTION_BACKUP_RESTORE = "dev.claw800.runtime.BACKUP_RESTORE";
+    public static final String ACTION_BACKUP_VALIDATE = "dev.claw800.runtime.BACKUP_VALIDATE";
     public static final String ACTION_BACKUP_ESTIMATE = "dev.claw800.runtime.BACKUP_ESTIMATE";
     public static final String ACTION_BACKUP_PERMISSION_STATUS = "dev.claw800.runtime.BACKUP_PERMISSION_STATUS";
 
@@ -260,6 +261,8 @@ public class ClawRuntimeControlService extends Service {
                 handleBackupList(intent);
             } else if (ACTION_BACKUP_RESTORE.equals(action)) {
                 handleBackupRestore(intent);
+            } else if (ACTION_BACKUP_VALIDATE.equals(action)) {
+                handleBackupValidate(intent);
             } else if (ACTION_BACKUP_ESTIMATE.equals(action)) {
                 handleBackupEstimate(intent);
             } else if (ACTION_BACKUP_PERMISSION_STATUS.equals(action)) {
@@ -706,6 +709,23 @@ public class ClawRuntimeControlService extends Service {
         sendSuccessResult(intent, ACTION_BACKUP_LIST, out);
     }
 
+    private void handleBackupValidate(Intent intent) throws Exception {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                throw new IllegalStateException(
+                    "Cannot validate backup: All files access not granted. " +
+                    "Go to Settings -> Apps -> Termux -> Special app access -> " +
+                    "All files access -> enable it."
+                );
+            }
+        }
+
+        String filename = requireBackupFilename(intent);
+        File archiveFile = resolveBackupArchiveFile(filename);
+        JSONObject validation = validateBackupArchive(archiveFile);
+        sendSuccessResult(intent, ACTION_BACKUP_VALIDATE, validation);
+    }
+
     private void handleBackupRestore(Intent intent) throws Exception {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
@@ -717,18 +737,26 @@ public class ClawRuntimeControlService extends Service {
             }
         }
 
-        String filename = intent.getStringExtra(EXTRA_BACKUP_FILENAME);
-        if (filename == null || filename.isEmpty()) {
-            throw new IllegalArgumentException("Missing " + EXTRA_BACKUP_FILENAME);
-        }
-
-        File archiveFile = new File(BACKUP_DIR_PATH, filename);
-        if (!archiveFile.exists()) {
-            throw new IllegalArgumentException("Backup file not found: " + archiveFile.getAbsolutePath());
-        }
+        String filename = requireBackupFilename(intent);
+        File archiveFile = resolveBackupArchiveFile(filename);
 
         if (!isRootfsReady()) {
             throw new IllegalStateException("Cannot restore backup: rootfs is not ready.");
+        }
+
+        // Validate before any destructive step (do not clear /root/.nanobot until confirmed valid).
+        JSONObject validation = validateBackupArchive(archiveFile);
+        if (!validation.optBoolean("valid", false)) {
+            String reason = validation.optString("reason", "Invalid backup file.");
+            throw new IllegalArgumentException("Cannot restore backup: " + reason);
+        }
+
+        String configRelPath = validation.getString("configPath");
+        String nanobotDir = configRelPath.endsWith("/config.json")
+            ? configRelPath.substring(0, configRelPath.length() - "/config.json".length())
+            : configRelPath.replace("config.json", "");
+        if (nanobotDir.endsWith("/")) {
+            nanobotDir = nanobotDir.substring(0, nanobotDir.length() - 1);
         }
 
         // Step 1: clear the existing /root/.nanobot in the rootfs.
@@ -738,16 +766,7 @@ public class ClawRuntimeControlService extends Service {
             "mkdir -p '" + GUEST_NANOBOT_DIR + "'\n";
         runTermuxShellCommand(clearScript, true);
 
-        // Step 2: detect the internal directory structure of the archive.
-        // Native backups use "./root/.nanobot"; external backups use e.g. "clawbot-home-.../data".
-        String nanobotDir = findNanobotDirInArchive(archiveFile);
-        if (nanobotDir == null || nanobotDir.isEmpty()) {
-            throw new IllegalArgumentException(
-                "Cannot restore backup: config.json not found in archive."
-            );
-        }
-
-        // Step 3: extract and place contents into rootfs.
+        // Step 2: extract and place contents into rootfs.
         String output;
         boolean isNativeBackup = nanobotDir.equals("./root/.nanobot") || nanobotDir.equals("root/.nanobot");
         if (isNativeBackup) {
@@ -759,29 +778,8 @@ public class ClawRuntimeControlService extends Service {
                 "  '" + nanobotDir + "'\n";
             output = runTermuxShellCommand(restoreScript, true);
         } else {
-            // External backup: extract to temp, then copy data/ contents to rootfs.
-            String tempExtractDir = TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH + "/claw800-restore-tmp";
-            runTermuxShellCommand("rm -rf '" + tempExtractDir + "' && mkdir -p '" + tempExtractDir + "'", true);
-
-            String extractScript;
-            if (filename.endsWith(".zip")) {
-                extractScript = "unzip -o '" + archiveFile.getAbsolutePath() + "' -d '" + tempExtractDir + "'\n";
-            } else {
-                extractScript = "tar xzf '" + archiveFile.getAbsolutePath() + "' -C '" + tempExtractDir + "'\n";
-            }
-            runTermuxShellCommand(extractScript, true);
-
-            // Copy data/ folder contents into the rootfs nanobot dir.
-            String dataDir = tempExtractDir + "/" + nanobotDir + "/data";
-            String copyScript =
-                "set -eu\n" +
-                "if [ -d '" + dataDir + "' ]; then\n" +
-                "  cp -a '" + dataDir + "'/. '" + GUEST_NANOBOT_DIR + "'/\n" +
-                "fi\n";
-            output = runTermuxShellCommand(copyScript, true);
-
-            // Cleanup temp.
-            runTermuxShellCommand("rm -rf '" + tempExtractDir + "'", false);
+            // External backup: extract (unwrap nested .tar if present), find data/ on disk, copy.
+            output = restoreExternalBackupArchive(archiveFile, filename);
         }
 
         // Verify config survived.
@@ -1393,34 +1391,166 @@ public class ClawRuntimeControlService extends Service {
         return Math.max(estimated, 16 * 1024L);
     }
 
+    private String requireBackupFilename(Intent intent) {
+        String filename = intent.getStringExtra(EXTRA_BACKUP_FILENAME);
+        if (filename == null || filename.isEmpty()) {
+            throw new IllegalArgumentException("Missing " + EXTRA_BACKUP_FILENAME);
+        }
+        if (filename.contains("/") || filename.contains("\\") || filename.contains("..")) {
+            throw new IllegalArgumentException("Invalid backup filename.");
+        }
+        return filename;
+    }
+
+    private File resolveBackupArchiveFile(String filename) {
+        File archiveFile = new File(BACKUP_DIR_PATH, filename);
+        if (!archiveFile.exists()) {
+            throw new IllegalArgumentException("Backup file not found: " + archiveFile.getAbsolutePath());
+        }
+        return archiveFile;
+    }
+
+    /**
+     * Pre-restore validation: file exists, supported archive type, and config.json is discoverable.
+     * Safe to call without modifying rootfs (read-only checks on the backup archive).
+     */
+    private JSONObject validateBackupArchive(File archiveFile) throws Exception {
+        JSONObject out = new JSONObject();
+        String name = archiveFile.getName();
+        out.put("filename", name);
+        out.put("path", archiveFile.getAbsolutePath());
+        out.put("sizeBytes", archiveFile.length());
+
+        if (!archiveFile.isFile()) {
+            out.put("valid", false);
+            out.put("reason", "Backup file not found.");
+            return out;
+        }
+        if (archiveFile.length() <= 0L) {
+            out.put("valid", false);
+            out.put("reason", "Backup file is empty.");
+            return out;
+        }
+
+        String lowerName = name.toLowerCase(Locale.US);
+        boolean supportedExt = lowerName.endsWith(".tar.gz")
+            || lowerName.endsWith(".tgz")
+            || lowerName.endsWith(".zip");
+        if (!supportedExt) {
+            out.put("valid", false);
+            out.put("reason", "Unsupported format. Use .tar.gz or .zip.");
+            return out;
+        }
+
+        String configRelPath = findConfigJsonRelativePathInArchive(archiveFile);
+        if (configRelPath == null || configRelPath.isEmpty()) {
+            out.put("valid", false);
+            out.put("reason", "config.json not found in archive.");
+            return out;
+        }
+
+        boolean isKnownNativePrefix = name.startsWith("800claw-backup-") || name.startsWith("nanobot-backup-");
+        boolean isNativeLayout = configRelPath.startsWith("./root/.nanobot")
+            || configRelPath.startsWith("root/.nanobot");
+        String source = (isKnownNativePrefix || isNativeLayout) ? "native" : "external";
+
+        out.put("valid", true);
+        out.put("source", source);
+        out.put("configPath", configRelPath);
+        out.put("reason", JSONObject.NULL);
+        return out;
+    }
+
     /**
      * Check if a tar.gz or zip file contains a config.json anywhere in its tree.
      * Used to identify external nanobot backup archives without known prefixes.
+     * Supports nested layouts such as outer.tar.gz → inner.tar → instance/data/config.json.
      */
     private boolean archiveContainsConfig(File archiveFile) {
-        String name = archiveFile.getName();
-        String script;
-        if (name.endsWith(".zip")) {
-            script = "unzip -l '" + archiveFile.getAbsolutePath() + "' | grep -m1 'config.json'";
-        } else {
-            script = "tar tzf '" + archiveFile.getAbsolutePath() + "' | grep -m1 'config.json'";
-        }
         try {
-            String output = runTermuxShellCommand(script, false);
-            return output != null && !output.trim().isEmpty();
+            return findConfigJsonRelativePathInArchive(archiveFile) != null;
         } catch (Exception e) {
             return false;
         }
     }
 
     /**
-     * Find the nanobot directory path inside a tar.gz or zip archive.
-     * Returns the path prefix that contains config.json, e.g.:
-     *   "./root/.nanobot"        (native backup)
-     *   "clawbot-home-.../data"  (external backup)
-     * Returns null if config.json not found.
+     * Restore an external backup (flat or nested) by extracting to temp, unwrapping inner
+     * .tar members, locating config.json on disk, and copying its parent directory (the
+     * nanobot data folder) into GUEST_NANOBOT_DIR.
      */
-    private String findNanobotDirInArchive(File archiveFile) throws Exception {
+    private String restoreExternalBackupArchive(File archiveFile, String filename) throws Exception {
+        String tempExtractDir = TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH + "/claw800-restore-tmp";
+        runTermuxShellCommand("rm -rf '" + tempExtractDir + "' && mkdir -p '" + tempExtractDir + "'", true);
+
+        try {
+            if (filename.endsWith(".zip")) {
+                runTermuxShellCommand(
+                    "unzip -o '" + archiveFile.getAbsolutePath() + "' -d '" + tempExtractDir + "'\n", true);
+            } else {
+                runTermuxShellCommand(
+                    "tar xzf '" + archiveFile.getAbsolutePath() + "' -C '" + tempExtractDir + "'\n", true);
+            }
+            unwrapNestedTarArchives(tempExtractDir);
+
+            String configPath = runTermuxShellCommand(
+                "find '" + tempExtractDir + "' -name config.json -type f 2>/dev/null | head -1",
+                false
+            );
+            if (configPath == null || configPath.trim().isEmpty()) {
+                throw new IllegalArgumentException(
+                    "Cannot restore backup: config.json not found after extraction."
+                );
+            }
+            configPath = configPath.trim();
+
+            // Parent of config.json is the nanobot data dir (cron, media, workspace, etc.).
+            String dataDir = configPath.substring(0, configPath.length() - "/config.json".length());
+            String copyScript =
+                "set -eu\n" +
+                "if [ -d '" + dataDir + "' ]; then\n" +
+                "  cp -a '" + dataDir + "'/. '" + GUEST_NANOBOT_DIR + "'/\n" +
+                "else\n" +
+                "  exit 1\n" +
+                "fi\n";
+            return runTermuxShellCommand(copyScript, true);
+        } finally {
+            runTermuxShellCommand("rm -rf '" + tempExtractDir + "'", false);
+        }
+    }
+
+    /**
+     * Extract any nested .tar archives found under rootDir (e.g. clawbot-home-....tar inside .tar.gz).
+     */
+    private void unwrapNestedTarArchives(String rootDir) throws Exception {
+        String script =
+            "set -eu\n" +
+            "find '" + rootDir + "' -maxdepth 4 -name '*.tar' -type f | while read -r t; do\n" +
+            "  d=\"$(dirname \"$t\")\"\n" +
+            "  tar xf \"$t\" -C \"$d\"\n" +
+            "done\n";
+        runTermuxShellCommand(script, false);
+    }
+
+    /**
+     * Return a path to config.json inside the archive (relative to archive root), or null.
+     * Handles flat archives and .tar.gz wrapping an inner .tar (clawbot-style backups).
+     */
+    private String findConfigJsonRelativePathInArchive(File archiveFile) throws Exception {
+        String path = findConfigJsonPathInArchiveListing(archiveFile);
+        if (path != null) return path;
+
+        String name = archiveFile.getName().toLowerCase(Locale.US);
+        if (name.endsWith(".tar.gz") || name.endsWith(".tgz")) {
+            return findConfigJsonPathInNestedTarMember(archiveFile);
+        }
+        return null;
+    }
+
+    /**
+     * Scan tar tzf / unzip -l output for config.json (single-level listing).
+     */
+    private String findConfigJsonPathInArchiveListing(File archiveFile) throws Exception {
         String listing;
         String name = archiveFile.getName();
         if (name.endsWith(".zip")) {
@@ -1431,14 +1561,53 @@ public class ClawRuntimeControlService extends Service {
                 "tar tzf '" + archiveFile.getAbsolutePath() + "'", false);
         }
         if (listing == null) return null;
+        return parseConfigJsonPathFromListing(listing, name.endsWith(".zip"));
+    }
 
+    /**
+     * Some external backups are .tar.gz containing a single inner .tar; config.json lives
+     * inside that inner archive. Stream the inner tar without writing to disk for detection.
+     */
+    private String findConfigJsonPathInNestedTarMember(File archiveFile) throws Exception {
+        String outerListing = runTermuxShellCommand(
+            "tar tzf '" + archiveFile.getAbsolutePath() + "'", false);
+        if (outerListing == null) return null;
+
+        String innerTarMember = null;
+        for (String line : outerListing.split("\n")) {
+            line = line.trim();
+            if (line.isEmpty()) continue;
+            if (line.endsWith(".tar") && !line.contains(" ")) {
+                innerTarMember = line;
+                break;
+            }
+        }
+        if (innerTarMember == null) return null;
+
+        String script =
+            "tar xzf '" + archiveFile.getAbsolutePath() + "' -O '" + innerTarMember + "' 2>/dev/null " +
+            "| tar tzf - 2>/dev/null | grep -m1 'config.json'";
+        String output = runTermuxShellCommand(script, false);
+        if (output == null || output.trim().isEmpty()) return null;
+
+        for (String line : output.split("\n")) {
+            line = line.trim();
+            if (line.contains("config.json")) {
+                if (line.endsWith("/config.json") || line.equals("config.json")) {
+                    return line.endsWith("/config.json") ? line : "config.json";
+                }
+            }
+        }
+        return null;
+    }
+
+    private String parseConfigJsonPathFromListing(String listing, boolean isZip) {
         for (String line : listing.split("\n")) {
             line = line.trim();
             if (line.startsWith("---") || line.startsWith("Archive") || line.isEmpty()) continue;
 
-            // For unzip -l: filename is the last whitespace-delimited column
             String path;
-            if (name.endsWith(".zip")) {
+            if (isZip) {
                 String[] parts = line.split("\\s+");
                 path = parts[parts.length - 1];
             } else {
@@ -1446,15 +1615,7 @@ public class ClawRuntimeControlService extends Service {
             }
 
             if (path.endsWith("/config.json") || path.equals("config.json")) {
-                String dir = path;
-                if (dir.endsWith("/config.json")) {
-                    dir = dir.substring(0, dir.length() - "/config.json".length());
-                } else {
-                    dir = dir.substring(0, dir.length() - "config.json".length());
-                }
-                // Remove trailing slash
-                if (dir.endsWith("/")) dir = dir.substring(0, dir.length() - 1);
-                return dir;
+                return path;
             }
         }
         return null;
