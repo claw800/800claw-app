@@ -80,6 +80,13 @@ public class ClawRuntimeControlService extends Service {
     public static final String ACTION_BACKUP_VALIDATE = "dev.claw800.runtime.BACKUP_VALIDATE";
     public static final String ACTION_BACKUP_ESTIMATE = "dev.claw800.runtime.BACKUP_ESTIMATE";
     public static final String ACTION_BACKUP_PERMISSION_STATUS = "dev.claw800.runtime.BACKUP_PERMISSION_STATUS";
+    public static final String ACTION_WEIXIN_LOGIN_START = "dev.claw800.runtime.WEIXIN_LOGIN_START";
+    public static final String ACTION_WEIXIN_LOGIN_STOP = "dev.claw800.runtime.WEIXIN_LOGIN_STOP";
+    public static final String ACTION_WEIXIN_LOGIN_STATUS = "dev.claw800.runtime.WEIXIN_LOGIN_STATUS";
+    public static final String ACTION_WEIXIN_ACCOUNT_READ = "dev.claw800.runtime.WEIXIN_ACCOUNT_READ";
+    public static final String ACTION_WEIXIN_LOGIN_STREAM_START = "dev.claw800.runtime.WEIXIN_LOGIN_STREAM_START";
+    public static final String ACTION_WEIXIN_LOGIN_STREAM_STOP = "dev.claw800.runtime.WEIXIN_LOGIN_STREAM_STOP";
+    public static final String ACTION_WEIXIN_LOGIN_STREAM_EVENT = "dev.claw800.runtime.WEIXIN_LOGIN_STREAM_EVENT";
 
     public static final String EXTRA_CALLER_PACKAGE = "dev.claw800.runtime.extra.CALLER_PACKAGE";
     public static final String EXTRA_RESULT_MESSENGER = "dev.claw800.runtime.extra.RESULT_MESSENGER";
@@ -107,6 +114,40 @@ public class ClawRuntimeControlService extends Service {
         TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/log/claw800-nanobot-gateway.log";
     private static final String NANOBOT_PID_PATH =
         TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/run/claw800-nanobot-gateway.pid";
+    private static final String WEIXIN_LOGIN_LOG_PATH =
+        TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/log/claw800-weixin-login.log";
+    private static final String WEIXIN_LOGIN_PID_PATH =
+        TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/run/claw800-weixin-login.pid";
+    private static final String GUEST_WEIXIN_ACCOUNT_PATH =
+        ROOTFS_INSTALL_DIR_PATH + "/root/.nanobot/weixin/account.json";
+    private static final String GUEST_WEIXIN_LOGIN_RUNNER_PATH =
+        ROOTFS_INSTALL_DIR_PATH + "/root/.nanobot/tools/weixin-login-runner.py";
+    private static final String WEIXIN_LOGIN_RUNNER_SOURCE =
+        "#!/usr/bin/env python3\n" +
+        "import asyncio\n" +
+        "import sys\n" +
+        "\n" +
+        "from nanobot.config.loader import load_config\n" +
+        "from nanobot.channels.weixin import WeixinChannel\n" +
+        "\n" +
+        "\n" +
+        "def _print_login_url(url: str) -> None:\n" +
+        "    print(f\"\\nLogin URL: {url}\\n\", flush=True)\n" +
+        "\n" +
+        "\n" +
+        "WeixinChannel._print_qr_code = staticmethod(_print_login_url)\n" +
+        "\n" +
+        "\n" +
+        "def main() -> int:\n" +
+        "    config = load_config()\n" +
+        "    raw = getattr(config.channels, \"weixin\", None) or {}\n" +
+        "    channel = WeixinChannel(raw if isinstance(raw, dict) else {}, bus=None)\n" +
+        "    ok = asyncio.run(channel.login(force=True))\n" +
+        "    return 0 if ok else 1\n" +
+        "\n" +
+        "\n" +
+        "if __name__ == \"__main__\":\n" +
+        "    sys.exit(main())\n";
     private static final String RUNTIME_POLICY_PATH =
         TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/lib/claw800/runtime-policy.json";
 
@@ -132,6 +173,11 @@ public class ClawRuntimeControlService extends Service {
     private static long sNanobotLastExitAtMs = 0L;
     private static String sNanobotLastError = "";
     private static Thread sLogStreamThread;
+    private static Process sWeixinLoginProcess;
+    private static long sWeixinLoginStartedAtMs;
+    private static int sWeixinLoginLastExitCode = Integer.MIN_VALUE;
+    private static long sWeixinLoginLastExitAtMs = 0L;
+    private static Thread sWeixinLoginStreamThread;
     private static PowerManager.WakeLock sNanobotWakeLock;
     private static WifiManager.WifiLock sNanobotWifiLock;
 
@@ -267,6 +313,18 @@ public class ClawRuntimeControlService extends Service {
                 handleBackupEstimate(intent);
             } else if (ACTION_BACKUP_PERMISSION_STATUS.equals(action)) {
                 handleBackupPermissionStatus(intent);
+            } else if (ACTION_WEIXIN_LOGIN_START.equals(action)) {
+                handleWeixinLoginStart(intent);
+            } else if (ACTION_WEIXIN_LOGIN_STOP.equals(action)) {
+                handleWeixinLoginStop(intent);
+            } else if (ACTION_WEIXIN_LOGIN_STATUS.equals(action)) {
+                handleWeixinLoginStatus(intent);
+            } else if (ACTION_WEIXIN_ACCOUNT_READ.equals(action)) {
+                handleWeixinAccountRead(intent);
+            } else if (ACTION_WEIXIN_LOGIN_STREAM_START.equals(action)) {
+                handleWeixinLoginStreamStart(intent);
+            } else if (ACTION_WEIXIN_LOGIN_STREAM_STOP.equals(action)) {
+                handleWeixinLoginStreamStop(intent);
             } else {
                 sendFailureResult(intent, action, "Unsupported action: " + action);
             }
@@ -513,6 +571,398 @@ public class ClawRuntimeControlService extends Service {
         sendResultBundle(requestIntent, 2, bundle);
     }
 
+    private void handleWeixinLoginStart(Intent intent) throws Exception {
+        if (!isRootfsReady()) {
+            throw new IllegalStateException("Cannot start Weixin login: rootfs is not ready.");
+        }
+
+        stopWeixinLoginProcess();
+
+        File logFile = new File(WEIXIN_LOGIN_LOG_PATH);
+        File logParent = logFile.getParentFile();
+        if (logParent != null && !logParent.exists() && !logParent.mkdirs()) {
+            throw new IllegalStateException("Cannot create Weixin login log directory: " + logParent.getAbsolutePath());
+        }
+
+        try (FileOutputStream ignored = new FileOutputStream(logFile, false)) {
+            // Truncate/create login log for this attempt.
+        }
+        try (FileOutputStream fos = new FileOutputStream(logFile, true)) {
+            String marker = "\n=== " + nowIso() + " claw800 runtime starting weixin login ===\n";
+            fos.write(marker.getBytes(StandardCharsets.UTF_8));
+        }
+
+        writeWeixinLoginRunnerIfNeeded();
+
+        String script =
+            "set -eu\n" +
+            "mkdir -p '" + new File(WEIXIN_LOGIN_PID_PATH).getParent() + "'\n" +
+            "printf '%s\\n' $$ > '" + WEIXIN_LOGIN_PID_PATH + "'\n" +
+            "export PYTHONUNBUFFERED=1\n" +
+            "exec proot-distro login " + ROOTFS_ALIAS + " -- bash -lc '" +
+            "export PYTHONUNBUFFERED=1; source /opt/venv/bin/activate && exec python -u /root/.nanobot/tools/weixin-login-runner.py'\n";
+
+        ProcessBuilder pb = new ProcessBuilder(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + "/sh", "-c", script);
+        Map<String, String> env = pb.environment();
+        String originalPath = env.get("PATH");
+        if (originalPath == null) originalPath = "";
+        env.put("PATH", TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":" + originalPath);
+        env.put("LD_LIBRARY_PATH", TermuxConstants.TERMUX_LIB_PREFIX_DIR_PATH);
+        env.put("TMPDIR", TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH);
+        env.put("PYTHONUNBUFFERED", "1");
+        pb.redirectErrorStream(true);
+        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile));
+
+        Process started = pb.start();
+        synchronized (STATE_LOCK) {
+            sWeixinLoginProcess = started;
+            sWeixinLoginStartedAtMs = System.currentTimeMillis();
+            sWeixinLoginLastExitCode = Integer.MIN_VALUE;
+        }
+        startForegroundIfNeeded();
+        watchWeixinLoginExit(started);
+
+        JSONObject out = buildWeixinLoginStatusJson(DEFAULT_TAIL_LINES);
+        out.put("startedAt", nowIso());
+        sendSuccessResult(intent, ACTION_WEIXIN_LOGIN_START, out);
+    }
+
+    private void writeWeixinLoginRunnerIfNeeded() throws Exception {
+        File runnerFile = new File(GUEST_WEIXIN_LOGIN_RUNNER_PATH);
+        File parent = runnerFile.getParentFile();
+        if (parent == null) {
+            throw new IllegalStateException("Weixin login runner parent directory is null.");
+        }
+        if (!parent.exists() && !parent.mkdirs()) {
+            throw new IllegalStateException("Failed to create nanobot directory: " + parent.getAbsolutePath());
+        }
+
+        File tmpFile = new File(parent, "weixin-login-runner.py.tmp");
+        try (FileOutputStream fos = new FileOutputStream(tmpFile, false)) {
+            fos.write(WEIXIN_LOGIN_RUNNER_SOURCE.getBytes(StandardCharsets.UTF_8));
+            fos.getFD().sync();
+        }
+
+        String mvScript =
+            "set -eu\n" +
+            "mv -f '" + tmpFile.getAbsolutePath() + "' '" + runnerFile.getAbsolutePath() + "'\n" +
+            "chmod 700 '" + runnerFile.getAbsolutePath() + "'\n";
+        runTermuxShellCommand(mvScript, true);
+    }
+
+    private void handleWeixinLoginStop(Intent intent) throws Exception {
+        stopWeixinLoginProcess();
+        JSONObject out = buildWeixinLoginStatusJson(DEFAULT_TAIL_LINES);
+        out.put("stoppedAt", nowIso());
+        sendSuccessResult(intent, ACTION_WEIXIN_LOGIN_STOP, out);
+    }
+
+    private void handleWeixinLoginStatus(Intent intent) throws Exception {
+        int tailLines = sanitizeTailCount(intent.getIntExtra(EXTRA_LOG_LINES, DEFAULT_TAIL_LINES));
+        sendSuccessResult(intent, ACTION_WEIXIN_LOGIN_STATUS, buildWeixinLoginStatusJson(tailLines));
+    }
+
+    private void handleWeixinAccountRead(Intent intent) throws Exception {
+        sendSuccessResult(intent, ACTION_WEIXIN_ACCOUNT_READ, buildWeixinAccountJson());
+    }
+
+    private void handleWeixinLoginStreamStart(final Intent intent) throws Exception {
+        final File logFile = new File(WEIXIN_LOGIN_LOG_PATH);
+        final File parent = logFile.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            throw new IllegalStateException("Cannot create Weixin login log directory: " + parent.getAbsolutePath());
+        }
+        if (!logFile.exists() && !logFile.createNewFile()) {
+            throw new IllegalStateException("Cannot create Weixin login log file: " + WEIXIN_LOGIN_LOG_PATH);
+        }
+
+        stopWeixinLoginStreamWorkerLocked();
+
+        final Intent streamIntent = new Intent(intent);
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                runWeixinLoginStreamWorker(streamIntent, logFile);
+            }
+        }, "claw800-weixin-login-stream");
+
+        synchronized (STATE_LOCK) {
+            sWeixinLoginStreamThread = worker;
+        }
+        worker.start();
+        startForegroundIfNeeded();
+
+        JSONObject out = new JSONObject();
+        out.put("streaming", true);
+        out.put("path", WEIXIN_LOGIN_LOG_PATH);
+        out.put("startedAt", nowIso());
+        sendSuccessResult(intent, ACTION_WEIXIN_LOGIN_STREAM_START, out);
+    }
+
+    private void handleWeixinLoginStreamStop(Intent intent) throws Exception {
+        stopWeixinLoginStreamWorkerLocked();
+        JSONObject out = new JSONObject();
+        out.put("streaming", false);
+        out.put("stoppedAt", nowIso());
+        sendSuccessResult(intent, ACTION_WEIXIN_LOGIN_STREAM_STOP, out);
+    }
+
+    private void runWeixinLoginStreamWorker(Intent streamIntent, File logFile) {
+        long cursor = Math.max(0L, logFile.length());
+        while (true) {
+            Thread current = Thread.currentThread();
+            synchronized (STATE_LOCK) {
+                if (sWeixinLoginStreamThread != current) break;
+            }
+            if (current.isInterrupted()) break;
+            try {
+                long fileLen = logFile.length();
+                if (fileLen < cursor) {
+                    cursor = 0L;
+                }
+                if (fileLen > cursor) {
+                    long remaining = fileLen - cursor;
+                    int toRead = (int) Math.min(remaining, LOG_STREAM_MAX_CHUNK_BYTES);
+                    byte[] bytes = new byte[toRead];
+                    try (RandomAccessFile raf = new RandomAccessFile(logFile, "r")) {
+                        raf.seek(cursor);
+                        raf.readFully(bytes);
+                    }
+                    cursor += toRead;
+                    String chunk = new String(bytes, StandardCharsets.UTF_8);
+                    if (!chunk.isEmpty()) {
+                        JSONObject payload = new JSONObject();
+                        payload.put("path", WEIXIN_LOGIN_LOG_PATH);
+                        payload.put("chunk", chunk);
+                        payload.put("appendedAt", nowIso());
+                        sendWeixinLoginStreamEvent(streamIntent, payload);
+                    }
+                }
+                Thread.sleep(LOG_STREAM_POLL_INTERVAL_MS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                Logger.logStackTraceWithMessage(LOG_TAG, "weixin login stream worker failed", e);
+                try {
+                    JSONObject payload = new JSONObject();
+                    payload.put("path", WEIXIN_LOGIN_LOG_PATH);
+                    payload.put("error", e.getMessage() == null ? "weixin login stream worker failed" : e.getMessage());
+                    payload.put("appendedAt", nowIso());
+                    sendWeixinLoginStreamEvent(streamIntent, payload);
+                } catch (Exception ignore) {
+                    // Ignore secondary stream event failure.
+                }
+                try {
+                    Thread.sleep(1000L);
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+    }
+
+    private void sendWeixinLoginStreamEvent(Intent requestIntent, JSONObject payload) {
+        Bundle bundle = new Bundle();
+        bundle.putBoolean(RESULT_OK, true);
+        bundle.putString(RESULT_ACTION, ACTION_WEIXIN_LOGIN_STREAM_EVENT);
+        bundle.putString(RESULT_JSON, payload.toString());
+        sendResultBundle(requestIntent, 2, bundle);
+    }
+
+    private JSONObject buildWeixinAccountJson() throws Exception {
+        File accountFile = new File(GUEST_WEIXIN_ACCOUNT_PATH);
+        JSONObject out = new JSONObject();
+        out.put("path", GUEST_WEIXIN_ACCOUNT_PATH);
+        out.put("accountExists", accountFile.exists());
+        boolean hasToken = false;
+        if (accountFile.exists()) {
+            try {
+                JSONObject parsed = new JSONObject(readFile(accountFile));
+                String token = parsed.optString("token", "");
+                hasToken = token != null && !token.trim().isEmpty();
+            } catch (Exception e) {
+                Logger.logStackTraceWithMessage(LOG_TAG, "Failed to parse Weixin account.json", e);
+            }
+        }
+        out.put("hasToken", hasToken);
+        return out;
+    }
+
+    private JSONObject buildWeixinLoginStatusJson(int tailLines) throws Exception {
+        boolean running;
+        long startedAtMs;
+        int lastExitCode;
+        long lastExitAtMs;
+        synchronized (STATE_LOCK) {
+            running = isWeixinLoginRunningLocked();
+            startedAtMs = sWeixinLoginStartedAtMs;
+            lastExitCode = sWeixinLoginLastExitCode;
+            lastExitAtMs = sWeixinLoginLastExitAtMs;
+        }
+
+        JSONObject account = buildWeixinAccountJson();
+        File logFile = new File(WEIXIN_LOGIN_LOG_PATH);
+        ArrayDeque<String> tail = readTailLines(logFile, tailLines);
+        JSONArray logTail = new JSONArray();
+        for (String line : tail) {
+            logTail.put(line);
+        }
+
+        JSONObject out = new JSONObject();
+        out.put("running", running);
+        out.put("startedAtMs", startedAtMs == 0L ? JSONObject.NULL : startedAtMs);
+        out.put("logPath", WEIXIN_LOGIN_LOG_PATH);
+        out.put("accountPath", GUEST_WEIXIN_ACCOUNT_PATH);
+        out.put("accountExists", account.optBoolean("accountExists", false));
+        out.put("hasToken", account.optBoolean("hasToken", false));
+        out.put("lastExitCode", lastExitCode == Integer.MIN_VALUE ? JSONObject.NULL : lastExitCode);
+        out.put("lastExitAtMs", lastExitAtMs == 0L ? JSONObject.NULL : lastExitAtMs);
+        out.put("outputTail", trimForJson(String.join("\n", tail.toArray(new String[0])), 1200));
+        out.put("logTail", logTail);
+        return out;
+    }
+
+    private void watchWeixinLoginExit(final Process observedProcess) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                int exitCode = Integer.MIN_VALUE;
+                try {
+                    exitCode = observedProcess.waitFor();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+
+                synchronized (STATE_LOCK) {
+                    if (sWeixinLoginProcess == observedProcess) {
+                        sWeixinLoginProcess = null;
+                        sWeixinLoginLastExitCode = exitCode;
+                        sWeixinLoginLastExitAtMs = System.currentTimeMillis();
+                    }
+                }
+
+                FileUtils.deleteFile("weixin login pid file", WEIXIN_LOGIN_PID_PATH, true);
+                mMainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        stopForegroundIfIdle();
+                    }
+                });
+            }
+        }, "claw800-weixin-login-watch").start();
+    }
+
+    private void stopWeixinLoginProcess() throws Exception {
+        Process processToStop;
+        synchronized (STATE_LOCK) {
+            processToStop = sWeixinLoginProcess;
+        }
+
+        if (processToStop == null || !isProcessAlive(processToStop)) {
+            synchronized (STATE_LOCK) {
+                sWeixinLoginProcess = null;
+            }
+            stopWeixinLoginByPidFileIfPresent();
+            return;
+        }
+
+        processToStop.destroy();
+        try {
+            boolean exited = processToStop.waitFor(5, TimeUnit.SECONDS);
+            if (!exited && isProcessAlive(processToStop)) {
+                destroyProcessForcibly(processToStop);
+                processToStop.waitFor(3, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            destroyProcessForcibly(processToStop);
+        }
+
+        stopWeixinLoginByPidFileIfPresent();
+
+        synchronized (STATE_LOCK) {
+            if (sWeixinLoginProcess == processToStop) {
+                sWeixinLoginProcess = null;
+                sWeixinLoginLastExitAtMs = System.currentTimeMillis();
+                sWeixinLoginLastExitCode = 0;
+            }
+        }
+
+        FileUtils.deleteFile("weixin login pid file", WEIXIN_LOGIN_PID_PATH, true);
+        stopForegroundIfIdle();
+    }
+
+    private void stopWeixinLoginByPidFileIfPresent() throws Exception {
+        File pidFile = new File(WEIXIN_LOGIN_PID_PATH);
+        if (!pidFile.exists()) {
+            stopForegroundIfIdle();
+            return;
+        }
+
+        String pidRaw = readFile(pidFile).trim();
+        if (pidRaw.isEmpty()) {
+            FileUtils.deleteFile("weixin login pid file", WEIXIN_LOGIN_PID_PATH, true);
+            stopForegroundIfIdle();
+            return;
+        }
+
+        String script =
+            "set -eu\n" +
+            "PID='" + pidRaw + "'\n" +
+            "if kill -0 \"$PID\" 2>/dev/null; then\n" +
+            "  kill \"$PID\" 2>/dev/null || true\n" +
+            "  sleep 1\n" +
+            "fi\n" +
+            "if kill -0 \"$PID\" 2>/dev/null; then\n" +
+            "  kill -9 \"$PID\" 2>/dev/null || true\n" +
+            "fi\n";
+        runTermuxShellCommand(script, false);
+
+        FileUtils.deleteFile("weixin login pid file", WEIXIN_LOGIN_PID_PATH, true);
+        synchronized (STATE_LOCK) {
+            sWeixinLoginProcess = null;
+            sWeixinLoginLastExitAtMs = System.currentTimeMillis();
+            sWeixinLoginLastExitCode = 0;
+        }
+        stopForegroundIfIdle();
+    }
+
+    private boolean isWeixinLoginRunning() {
+        synchronized (STATE_LOCK) {
+            return isWeixinLoginRunningLocked();
+        }
+    }
+
+    private boolean isWeixinLoginRunningLocked() {
+        return sWeixinLoginProcess != null && isProcessAlive(sWeixinLoginProcess);
+    }
+
+    private boolean isWeixinLoginStreamActive() {
+        synchronized (STATE_LOCK) {
+            return sWeixinLoginStreamThread != null && sWeixinLoginStreamThread.isAlive();
+        }
+    }
+
+    private void stopWeixinLoginStreamWorkerLocked() {
+        Thread threadToStop;
+        synchronized (STATE_LOCK) {
+            threadToStop = sWeixinLoginStreamThread;
+            sWeixinLoginStreamThread = null;
+        }
+        if (threadToStop != null) {
+            threadToStop.interrupt();
+        }
+    }
+
+    private boolean isRuntimeControlIdle() {
+        return !isNanobotRunning()
+            && !isLogStreamActive()
+            && !isWeixinLoginRunning()
+            && !isWeixinLoginStreamActive();
+    }
+
     private void handleEnsureAutostart(Intent intent) throws Exception {
         JSONObject out = new JSONObject();
         boolean rootfsReady = isRootfsReady();
@@ -525,34 +975,38 @@ public class ClawRuntimeControlService extends Service {
             out.put("started", false);
             out.put("status", "waitingForRootfs");
             out.put("reason", "rootfs not ready");
-        } else if (!configExists) {
-            out.put("onboardAttempted", true);
-            try {
-                String onboardOutput = runNanobotOnboard();
-                out.put("onboardSucceeded", true);
-                out.put("onboardOutputTail", trimForJson(onboardOutput, 1200));
-            } catch (Exception e) {
-                out.put("onboardSucceeded", false);
-                out.put("onboardError", e.getMessage() != null ? e.getMessage() : "nanobot onboard failed");
-            }
+        } else {
+            ClawProvisiondManager.ensureProvisiond(getApplicationContext(), this::runTermuxShellCommand);
+            out.put("provisiondEnsured", true);
+            if (!configExists) {
+                out.put("onboardAttempted", true);
+                try {
+                    String onboardOutput = runNanobotOnboard();
+                    out.put("onboardSucceeded", true);
+                    out.put("onboardOutputTail", trimForJson(onboardOutput, 1200));
+                } catch (Exception e) {
+                    out.put("onboardSucceeded", false);
+                    out.put("onboardError", e.getMessage() != null ? e.getMessage() : "nanobot onboard failed");
+                }
 
-            boolean configCreated = configFile.exists();
-            out.put("configExistsAfterOnboard", configCreated);
-            if (!configCreated) {
-                out.put("started", false);
-                out.put("status", "waitingForConfig");
-                out.put("reason", "nanobot config still missing after onboard attempt");
+                boolean configCreated = configFile.exists();
+                out.put("configExistsAfterOnboard", configCreated);
+                if (!configCreated) {
+                    out.put("started", false);
+                    out.put("status", "waitingForConfig");
+                    out.put("reason", "nanobot config still missing after onboard attempt");
+                } else {
+                    JSONObject status = startNanobotProcessIfNeeded();
+                    out.put("started", true);
+                    out.put("status", "running");
+                    out.put("nanobot", status);
+                }
             } else {
                 JSONObject status = startNanobotProcessIfNeeded();
                 out.put("started", true);
                 out.put("status", "running");
                 out.put("nanobot", status);
             }
-        } else {
-            JSONObject status = startNanobotProcessIfNeeded();
-            out.put("started", true);
-            out.put("status", "running");
-            out.put("nanobot", status);
         }
         sendSuccessResult(intent, ACTION_ENSURE_AUTOSTART, out);
     }
@@ -1719,7 +2173,7 @@ public class ClawRuntimeControlService extends Service {
     }
 
     private int maybeStopSelf() {
-        if (!isNanobotRunning() && !isLogStreamActive()) {
+        if (isRuntimeControlIdle()) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 stopForeground(true);
             }
@@ -1735,7 +2189,7 @@ public class ClawRuntimeControlService extends Service {
     }
 
     private void stopForegroundIfIdle() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isNanobotRunning() && !isLogStreamActive()) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && isRuntimeControlIdle()) {
             stopForeground(true);
             stopSelf();
         }
@@ -1744,6 +2198,7 @@ public class ClawRuntimeControlService extends Service {
     @Override
     public void onDestroy() {
         stopLogStreamWorkerLocked();
+        stopWeixinLoginStreamWorkerLocked();
         releaseNanobotWakeAndWifiLockIfHeld();
         super.onDestroy();
     }

@@ -187,6 +187,9 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- OEM "quick boot" (e.g. Xiaomi, HTC) — same trigger as BOOT_COMPLETED -->
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
 
@@ -231,6 +234,12 @@
                 <action android:name="dev.claw800.runtime.BACKUP_VALIDATE" />
                 <action android:name="dev.claw800.runtime.BACKUP_ESTIMATE" />
                 <action android:name="dev.claw800.runtime.BACKUP_PERMISSION_STATUS" />
+                <action android:name="dev.claw800.runtime.WEIXIN_LOGIN_START" />
+                <action android:name="dev.claw800.runtime.WEIXIN_LOGIN_STOP" />
+                <action android:name="dev.claw800.runtime.WEIXIN_LOGIN_STATUS" />
+                <action android:name="dev.claw800.runtime.WEIXIN_ACCOUNT_READ" />
+                <action android:name="dev.claw800.runtime.WEIXIN_LOGIN_STREAM_START" />
+                <action android:name="dev.claw800.runtime.WEIXIN_LOGIN_STREAM_STOP" />
             </intent-filter>
         </service>
 
