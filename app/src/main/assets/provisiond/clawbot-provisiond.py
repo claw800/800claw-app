@@ -276,11 +276,7 @@ def connect_loop(hub_base: str, device_id: str, secret: str, product: str) -> No
                 )
             )
             backoff = 1
-            last_heartbeat = time.time()
             while True:
-                if time.time() - last_heartbeat > 25:
-                    ws.send(json.dumps({"type": "heartbeat", "deviceId": device_id}))
-                    last_heartbeat = time.time()
                 ws.settimeout(5)
                 try:
                     raw = ws.recv()
@@ -289,13 +285,26 @@ def connect_loop(hub_base: str, device_id: str, secret: str, product: str) -> No
                 if not raw:
                     break
                 msg = json.loads(raw)
-                if msg.get("type") == "configure":
+                msg_type = msg.get("type")
+                if msg_type == "request_hello":
+                    ws.send(
+                        json.dumps(
+                            {
+                                "type": "hello",
+                                "deviceId": device_id,
+                                "payload": {
+                                    "product": product,
+                                    "phase": "waiting_for_config",
+                                    "version": "provisiond-1.0.0",
+                                },
+                            }
+                        )
+                    )
+                elif msg_type == "configure":
                     payload = msg.get("payload") or {}
                     if isinstance(payload, str):
                         payload = json.loads(payload)
                     handle_configure(ws, device_id, str(msg.get("messageId") or ""), payload, product)
-                elif msg.get("type") == "ping":
-                    continue
         except Exception as exc:
             print(f"provisiond reconnect in {backoff}s: {exc}", file=sys.stderr)
             time.sleep(backoff)

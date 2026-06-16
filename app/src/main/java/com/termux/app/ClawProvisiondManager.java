@@ -24,8 +24,8 @@ final class ClawProvisiondManager {
     private static final String GUEST_DEVICE_ID_PATH = GUEST_CLAWBOT_DIR + "/device-id";
     private static final String GUEST_DEVICE_SECRET_PATH = GUEST_CLAWBOT_DIR + "/device-secret";
     private static final String HOST_PROVISIOND_PATH =
-        TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/lib/claw800/provisiond.py";
-    private static final String GUEST_PROVISIOND_PATH = GUEST_CLAWBOT_DIR + "/provisiond.py";
+        TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/lib/claw800/clawbot-provisiond.py";
+    private static final String GUEST_PROVISIOND_PATH = GUEST_CLAWBOT_DIR + "/clawbot-provisiond.py";
     private static final String PROVISIOND_PID_PATH =
         TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH + "/run/claw800-provisiond.pid";
     private static final String PROVISIOND_LOG_PATH =
@@ -50,7 +50,7 @@ final class ClawProvisiondManager {
             throw new IllegalStateException("cannot create " + parent.getAbsolutePath());
         }
         AssetManager assets = context.getAssets();
-        try (InputStream in = assets.open("provisiond/provisiond.py");
+        try (InputStream in = assets.open("provisiond/clawbot-provisiond.py");
              FileOutputStream fos = new FileOutputStream(out)) {
             byte[] buf = new byte[8192];
             int read;
@@ -87,7 +87,7 @@ final class ClawProvisiondManager {
             "  exit 0\n" +
             "fi\n" +
             "hub_url=\"${HUB_BASE_URL:-http://127.0.0.1:8060}\"\n" +
-            "nohup proot-distro login " + ROOTFS_ALIAS + " -- bash -lc 'source /opt/venv/bin/activate && pip install -q websocket-client && python3 /root/.clawbot/provisiond.py --hub '\"$hub_url\"' --product 800claw-android --device-id-path /root/.clawbot/device-id --device-secret-path /root/.clawbot/device-secret' >>" +
+            "nohup proot-distro login " + ROOTFS_ALIAS + " -- bash -lc 'source /opt/venv/bin/activate && pip install -q websocket-client && python3 /root/.clawbot/clawbot-provisiond.py --hub '\"$hub_url\"' --product 800claw-android --device-id-path /root/.clawbot/device-id --device-secret-path /root/.clawbot/device-secret' >>" +
             q(PROVISIOND_LOG_PATH) + " 2>&1 &\n" +
             "echo $! > " + q(PROVISIOND_PID_PATH) + "\n" +
             "echo provisiond_started\n";
